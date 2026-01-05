@@ -169,6 +169,20 @@ def main():
             messages_failed += 1
             logger.error("❌ AI 투자 인사이트 메시지 발송 실패")
         
+        # 5. 바리케이트 메시지 전송 (메시지 뭉치 종료 표시)
+        barrier_end_message = f"""<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
+<b>🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧</b>
+<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
+<b>📊 리포트 종료</b>
+<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>"""
+        
+        if notifier.send_message(barrier_end_message):
+            messages_sent += 1
+            logger.info("✅ 바리케이트 종료 메시지 발송 성공")
+        else:
+            messages_failed += 1
+            logger.error("❌ 바리케이트 종료 메시지 발송 실패")
+        
         # 최종 결과
         if messages_failed == 0:
             logger.info(f"✅ 모든 텔레그램 메시지 발송 성공 (총 {messages_sent}개)")

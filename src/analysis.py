@@ -37,7 +37,7 @@ def get_stock_data(ticker: str, period: str = "1y") -> Optional[yf.Ticker]:
 
 def get_current_price(ticker: str) -> Optional[float]:
     """
-    현재 주가를 가져옴
+    현재 주가를 가져옴 (Close 컬럼 명시적 사용)
     
     Args:
         ticker: 주식 티커 심볼
@@ -50,17 +50,20 @@ def get_current_price(ticker: str) -> Optional[float]:
         if stock is None:
             return None
         
-        # 실시간 데이터 시도
-        data = stock.history(period="1d", interval="1m")
+        # 최신 거래일의 종가(Close)를 명시적으로 가져오기
+        # Adj Close가 아닌 실제 Close 사용
+        data = stock.history(period="5d")  # 최근 5일 데이터
+        
         if not data.empty:
+            # 가장 최근 거래일의 Close 가격 사용
             return float(data['Close'].iloc[-1])
         
-        # 실시간 데이터가 없으면 최신 종가 사용
+        # history가 실패하면 info에서 가져오기
         info = stock.info
-        if 'currentPrice' in info:
-            return float(info['currentPrice'])
-        elif 'regularMarketPrice' in info:
+        if 'regularMarketPrice' in info:
             return float(info['regularMarketPrice'])
+        elif 'currentPrice' in info:
+            return float(info['currentPrice'])
         elif 'previousClose' in info:
             return float(info['previousClose'])
         
@@ -73,7 +76,7 @@ def get_current_price(ticker: str) -> Optional[float]:
 
 def get_historical_price(ticker: str, days_ago: int) -> Optional[float]:
     """
-    과거 특정 시점의 주가를 가져옴 (거래일 기준)
+    과거 특정 시점의 주가를 가져옴 (정확한 날짜 기준, 거래일 보장)
     
     Args:
         ticker: 주식 티커 심볼
@@ -87,45 +90,52 @@ def get_historical_price(ticker: str, days_ago: int) -> Optional[float]:
         if stock is None:
             return None
         
-        # 충분한 기간의 데이터 가져오기
-        # 1년 데이터를 요청하는 경우도 있으므로 충분히 가져오기
+        # 정확한 날짜 기준으로 데이터 가져오기 (리포트 제안 방식)
+        # 충분한 기간의 데이터를 가져와서 정확한 날짜를 찾음
         if days_ago <= 30:
-            period = max(days_ago * 2, 60)
+            period_days = max(days_ago * 3, 90)  # 여유 있게
         elif days_ago <= 180:
-            period = max(days_ago * 2, 365)
+            period_days = max(days_ago * 2, 400)
         else:
-            period = max(days_ago * 2, 730)  # 2년치 데이터
+            period_days = max(days_ago * 2, 800)  # 1년 이상은 충분히
         
-        data = stock.history(period=f"{period}d")
+        # start/end 날짜를 명시적으로 지정하여 데이터 가져오기
+        end_date = datetime.now(pytz.UTC)
+        start_date = end_date - timedelta(days=period_days)
+        
+        # yfinance는 명시적으로 Close 컬럼 사용 (Adj Close 아님)
+        data = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
         
         if data.empty:
             logger.warning(f"{ticker}: 과거 데이터가 없습니다.")
             return None
         
-        # 데이터 인덱스는 이미 거래일만 포함되어 있음
-        # 가장 최근 데이터가 마지막 인덱스에 있음
-        # days_ago 거래일 전의 데이터를 가져오기
-        # 예: days_ago=1이면 1거래일 전 (어제 거래일)
-        #     days_ago=2이면 2거래일 전 (그저께 거래일)
-        
+        # 데이터가 거래일만 포함되어 있으므로, days_ago 거래일 전의 데이터를 정확히 찾기
         if len(data) <= days_ago:
             # 데이터가 충분하지 않으면 가장 오래된 데이터 사용
             logger.warning(f"{ticker}: {days_ago}거래일 전 데이터가 없어 가장 오래된 데이터 사용 ({len(data)}거래일)")
+            # Close 컬럼 명시적 사용 (Adj Close 아님)
             return float(data['Close'].iloc[0])
         
-        # 거래일 기준으로 인덱스 계산
+        # 거래일 기준으로 정확한 인덱스 계산
         # data.index[-1] = 가장 최근 거래일
         # data.index[-2] = 1거래일 전
-        # data.index[-3] = 2거래일 전
         # 따라서 data.index[-(days_ago+1)] = days_ago 거래일 전
         target_index = -(days_ago + 1)
         
         if abs(target_index) > len(data):
-            # 인덱스가 범위를 벗어나면 가장 오래된 데이터 사용
             logger.warning(f"{ticker}: {days_ago}거래일 전 데이터가 없어 가장 오래된 데이터 사용 ({len(data)}거래일)")
             return float(data['Close'].iloc[0])
         
-        return float(data['Close'].iloc[target_index])
+        # Close 컬럼 명시적 사용 (Adj Close가 아닌 실제 종가)
+        target_price = float(data['Close'].iloc[target_index])
+        
+        # 디버깅: 날짜와 가격 로그 (장기 수익률 계산 시)
+        if days_ago >= 30:
+            target_date = data.index[target_index]
+            logger.debug(f"{ticker}: {days_ago}거래일 전 ({target_date.strftime('%Y-%m-%d')}) 가격: {target_price:,.0f}")
+        
+        return target_price
         
     except Exception as e:
         logger.error(f"{ticker} {days_ago}일 전 가격 조회 실패: {e}")
@@ -164,17 +174,18 @@ def calculate_returns(ticker: str) -> Dict:
     
     result['current_price'] = current_price
     
-    # 기간별 수익률 계산
+    # 기간별 수익률 계산 (거래일 기준, 실제 시장 기준과 일치하도록 조정)
+    # 참고: 1개월 = 약 20-22거래일, 1년 = 약 250거래일 (한국 시장 기준)
     periods = {
-        '1D': 1,
-        '2D': 2,
-        '3D': 3,
-        '1W': 7,
-        '1M': 30,
-        '2M': 60,
-        '3M': 90,
-        '6M': 180,
-        '1Y': 365
+        '1D': 1,      # 1거래일 전
+        '2D': 2,      # 2거래일 전
+        '3D': 3,      # 3거래일 전
+        '1W': 5,      # 1주일 = 약 5거래일 (기존 7에서 조정)
+        '1M': 20,     # 1개월 = 약 20거래일 (기존 30에서 조정)
+        '2M': 40,     # 2개월 = 약 40거래일 (기존 60에서 조정)
+        '3M': 60,     # 3개월 = 약 60거래일 (기존 90에서 조정)
+        '6M': 120,    # 6개월 = 약 120거래일 (기존 180에서 조정)
+        '1Y': 250     # 1년 = 약 250거래일 (기존 365에서 조정)
     }
     
     for period_name, days in periods.items():
