@@ -122,36 +122,40 @@ class AIResearcher:
         """
         logger.info("=== AI 요약 코멘트 생성 시작 ===")
         
-        prompt = f"""You are a professional financial analyst providing concise investment insights.
+        prompt = f"""당신은 골드만삭스 출신의 수석 애널리스트입니다. 아래 데이터를 바탕으로 '매수/매도/관망'에 대한 명확한 의견을 포함한 전문가 수준의 투자 리포트를 작성하세요.
 
-Below is today's collected stock data and market news headlines. Based on this information, write a brief 3-paragraph investment commentary for investors.
+[제약 조건]
+1. 단순한 사실 나열을 금지합니다.
+   - 금지: "주가가 올랐습니다", "하락했습니다" 같은 사후 해설
+   - 권장: "매수세가 유입되어 상승 모멘텀이 지속되고 있습니다", "이익 실현 매물이 증가하여 단기 조정 가능성이 있습니다"
+2. 뉴스(A)와 주가(B)의 인과관계를 반드시 설명하세요.
+   - 예: "마두로 체포 뉴스로 인해 유가가 상승($57)하여 에너지 ETF 강세가 예상됩니다"
+   - 예: "CES 기대감으로 엔비디아가 상승하면서 국내 반도체주(하이닉스) 동반 상승 가능성이 높습니다"
+3. 포트폴리오(기술주, 금, 지수 ETF)와 관련 없는 잡다한 뉴스(화장품, 건설, 개별 소비재 등)는 무시하세요.
+4. 결론에는 반드시 'Action Plan'을 한 줄로 요약하세요.
+   - 예: "Action Plan: 단기적으로 기술주 비중을 10% 축소하고 현금을 확보하는 것이 유리합니다"
+   - 예: "Action Plan: 금리 하락 기대감이 커지고 있어 채권 ETF 비중을 늘리는 것을 고려하세요"
 
-**Collected Data:**
+[입력 데이터]
 {collected_data}
 
-**Requirements:**
-1. Write in Korean (한국어)
-2. Provide a concise 3-paragraph summary:
-   - Paragraph 1: Market overview based on stock price movements
-   - Paragraph 2: Key market news and their implications
-   - Paragraph 3: Investment insights and recommendations
-3. Be factual and avoid speculation
-4. Focus on actionable insights
-5. Keep each paragraph to 2-3 sentences
-6. Use clear formatting with line breaks for readability
-7. Use bullet points or numbered lists where appropriate
-
-**Output Format (가독성 높게):**
+[출력 형식]
 <b>시장 개요:</b>
-[summary - 2-3 sentences]
+주가 움직임을 바탕으로 한 시장 전반의 흐름 분석 (2-3문장)
+- 단순 상승/하락이 아닌, 매수세/매도세, 모멘텀, 트렌드 관점에서 분석
 
-<b>뉴스 분석:</b>
-[analysis - 2-3 sentences]
+<b>뉴스 분석 및 인과관계:</b>
+주요 뉴스와 주가 변동의 인과관계를 명확히 설명 (2-3문장)
+- "뉴스 A → 시장 영향 B → 포트폴리오 영향 C" 형식으로 설명
+- 경제 캘린더 일정이 있다면, 그 영향도 예측
 
-<b>투자 인사이트:</b>
-[insight - 2-3 sentences]
+<b>투자 인사이트 및 Action Plan:</b>
+구체적인 투자 의견과 실행 계획 (2-3문장)
+- 매수/매도/관망 중 하나를 명확히 제시
+- 구체적인 비중 조정이나 타이밍 제안
+- 마지막 줄에 반드시 "Action Plan: [구체적 행동]" 포함
 
-Write the commentary now with clear formatting:
+한국어로 작성하되, 전문가 수준의 깊이 있는 분석을 제공하세요:
 """
         
         logger.info("요약 코멘트 생성 중... (단 1회 API 호출, 검색 도구 비활성화)")

@@ -15,7 +15,13 @@ sys.path.insert(0, str(project_root))
 
 from config.settings import settings
 from src.analysis import get_stock_summary_by_category
-from src.crawler import get_market_news_with_context, get_market_indicators, translate_headlines
+from src.crawler import (
+    get_market_news_with_context, 
+    get_market_indicators, 
+    translate_headlines,
+    get_economic_calendar,
+    get_seeking_alpha_outlook
+)
 from src.ai_researcher import create_researcher
 from src.notifier import create_notifier
 
@@ -62,8 +68,18 @@ def main():
         macro_indicators = get_market_indicators()
         logger.info("매크로 경제 지표 수집 완료")
         
-        # Step 3: 뉴스 제목+요약 수집 (Python 크롤링)
-        logger.info("\n[Step 3] 시장 뉴스 수집 시작 (제목+요약)...")
+        # Step 2-1: 경제 캘린더 수집 (오늘/내일 중요 경제 지표)
+        logger.info("\n[Step 2-1] 경제 캘린더 수집 시작...")
+        economic_calendar = get_economic_calendar()
+        logger.info("경제 캘린더 수집 완료")
+        
+        # Step 2-2: 전문가 시장 전망 수집 (Seeking Alpha)
+        logger.info("\n[Step 2-2] 전문가 시장 전망 수집 시작...")
+        market_outlook = get_seeking_alpha_outlook()
+        logger.info("전문가 시장 전망 수집 완료")
+        
+        # Step 3: 뉴스 제목+요약 수집 (Python 크롤링, 필터링 적용)
+        logger.info("\n[Step 3] 시장 뉴스 수집 시작 (제목+요약, 필터링 적용)...")
         news_with_context = get_market_news_with_context(max_items=10)
         logger.info("뉴스 수집 완료")
         
@@ -80,7 +96,15 @@ def main():
         logger.info("\n[Step 6] 수집된 데이터 통합...")
         # AI 분석을 위해 모든 카테고리 메시지를 합침
         all_stock_summaries = "\n\n".join([msg for msg in stock_summaries.values() if msg])
-        collected_data = f"{all_stock_summaries}\n\n{macro_indicators}\n\n{news_translated}"
+        collected_data = f"""{all_stock_summaries}
+
+{macro_indicators}
+
+{economic_calendar}
+
+{market_outlook}
+
+{news_translated}"""
         logger.info(f"통합 데이터 준비 완료: {len(collected_data)}자")
         
         # Step 7: AI 요약 코멘트 생성 (AI는 요약만 수행)
@@ -145,6 +169,32 @@ def main():
         else:
             messages_failed += 1
             logger.error("❌ 매크로 경제 지표 메시지 발송 실패")
+        
+        # 2-1. 경제 캘린더 메시지 전송
+        economic_calendar_html = economic_calendar.replace("**📅 오늘/내일 중요 경제 지표 일정:**", "<b>📅 오늘/내일 중요 경제 지표 일정</b>")
+        economic_calendar_html = economic_calendar_html.replace("**📅 경제 캘린더:**", "<b>📅 경제 캘린더</b>")
+        if not economic_calendar_html.startswith("<b>"):
+            economic_calendar_html = f"<b>📅 경제 캘린더</b>\n{economic_calendar_html}"
+        calendar_message = f"{header}{economic_calendar_html}"
+        if notifier.send_message(calendar_message):
+            messages_sent += 1
+            logger.info("✅ 경제 캘린더 메시지 발송 성공")
+        else:
+            messages_failed += 1
+            logger.error("❌ 경제 캘린더 메시지 발송 실패")
+        
+        # 2-2. 전문가 시장 전망 메시지 전송
+        market_outlook_html = market_outlook.replace("**📊 전문가 시장 전망 (Seeking Alpha):**", "<b>📊 전문가 시장 전망 (Seeking Alpha)</b>")
+        market_outlook_html = market_outlook_html.replace("**📊 전문가 시장 전망:**", "<b>📊 전문가 시장 전망</b>")
+        if not market_outlook_html.startswith("<b>"):
+            market_outlook_html = f"<b>📊 전문가 시장 전망</b>\n{market_outlook_html}"
+        outlook_message = f"{header}{market_outlook_html}"
+        if notifier.send_message(outlook_message):
+            messages_sent += 1
+            logger.info("✅ 전문가 시장 전망 메시지 발송 성공")
+        else:
+            messages_failed += 1
+            logger.error("❌ 전문가 시장 전망 메시지 발송 실패")
         
         # 3. 주요 시장 뉴스 메시지 전송
         news_translated_html = news_translated.replace("**주요 시장 뉴스 헤드라인:**", "<b>📰 주요 시장 뉴스 (제목+요약)</b>")
