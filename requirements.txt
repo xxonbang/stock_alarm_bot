@@ -1,0 +1,24 @@
+# Stock Insight Bot 의존성 패키지
+
+# 주가 데이터 수집
+# Python 3.9 호환을 위해 버전 제한
+yfinance>=0.2.18,<1.0.0
+
+# Google AI (Gemini)
+google-generativeai>=0.3.0
+
+# 텔레그램 봇
+requests>=2.31.0
+
+# 웹 크롤링
+beautifulsoup4>=4.11.1
+
+# 설정 파일 파싱
+PyYAML>=6.0.1
+python-dotenv>=1.0.0
+
+# 시간대 처리
+pytz>=2023.3
+
+# 로깅 및 유틸리티는 표준 라이브러리 사용
+
