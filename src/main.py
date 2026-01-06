@@ -9,6 +9,11 @@ from pathlib import Path
 from datetime import datetime
 import pytz
 
+# gRPC DNS 리졸버 설정 (DNS 해석 실패 문제 해결)
+# c-ares 대신 OS의 기본 DNS 리졸버 사용
+os.environ["GRPC_DNS_RESOLVER"] = "native"
+os.environ["GRPC_VERBOSITY"] = "ERROR"  # 불필요한 gRPC 로그 끄기
+
 # 프로젝트 루트를 Python 경로에 추가
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -19,8 +24,7 @@ from src.crawler import (
     get_market_news_with_context, 
     get_market_indicators, 
     translate_headlines,
-    get_economic_calendar,
-    get_seeking_alpha_outlook
+    get_us_top_movers
 )
 from src.ai_researcher import create_researcher
 from src.notifier import create_notifier
@@ -68,15 +72,10 @@ def main():
         macro_indicators = get_market_indicators()
         logger.info("매크로 경제 지표 수집 완료")
         
-        # Step 2-1: 경제 캘린더 수집 (오늘/내일 중요 경제 지표)
-        logger.info("\n[Step 2-1] 경제 캘린더 수집 시작...")
-        economic_calendar = get_economic_calendar()
-        logger.info("경제 캘린더 수집 완료")
-        
-        # Step 2-2: 전문가 시장 전망 수집 (Seeking Alpha)
-        logger.info("\n[Step 2-2] 전문가 시장 전망 수집 시작...")
-        market_outlook = get_seeking_alpha_outlook()
-        logger.info("전문가 시장 전망 수집 완료")
+        # Step 2-1: 미국 Top Movers 수집 (나비 효과 분석용)
+        logger.info("\n[Step 2-1] 미국 Top Movers 수집 시작...")
+        us_top_movers = get_us_top_movers(max_items=10)
+        logger.info("미국 Top Movers 수집 완료")
         
         # Step 3: 뉴스 제목+요약 수집 (Python 크롤링, 필터링 적용)
         logger.info("\n[Step 3] 시장 뉴스 수집 시작 (제목+요약, 필터링 적용)...")
@@ -100,16 +99,14 @@ def main():
 
 {macro_indicators}
 
-{economic_calendar}
-
-{market_outlook}
+{us_top_movers}
 
 {news_translated}"""
         logger.info(f"통합 데이터 준비 완료: {len(collected_data)}자")
         
         # Step 7: AI 요약 코멘트 생성 (AI는 요약만 수행)
         logger.info("\n[Step 7] AI 요약 코멘트 생성 시작...")
-        ai_briefing = researcher.generate_briefing(collected_data)
+        ai_briefing, token_usage = researcher.generate_briefing(collected_data)
         logger.info("AI 요약 코멘트 생성 완료")
         
         # Step 8: 텔레그램 발송 (각 카테고리별로 개별 메시지 전송)
@@ -120,16 +117,16 @@ def main():
         kst = pytz.timezone('Asia/Seoul')
         now = datetime.now(kst)
         date_time_str = now.strftime("%Y년 %m월 %d일 %H시 %M분")
-        header = f"<b>📅 리포트 생성 시간: {date_time_str} (KST)</b>\n\n"
         
         # 메시지 발송 순서: 바리케이트 -> 각 티커 카테고리 -> 매크로 지표 -> 뉴스 -> AI 인사이트
         messages_sent = 0
         messages_failed = 0
         
-        # 0. 바리케이트 메시지 전송 (이전 메시지 뭉치와 구분)
+        # 0. 바리케이트 메시지 전송 (이전 메시지 뭉치와 구분) - 일자 정보 포함
         barrier_message = f"""<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
 <b>🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧</b>
 <b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
+<b>📅 리포트 생성 시간: {date_time_str} (KST)</b>
 <b>📊 새로운 리포트 시작</b>
 <b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>"""
         
@@ -150,7 +147,7 @@ def main():
         
         for category_key, category_name in category_order:
             if category_key in stock_summaries and stock_summaries[category_key]:
-                message = f"{header}{stock_summaries[category_key]}"
+                message = stock_summaries[category_key]
                 if notifier.send_message(message):
                     messages_sent += 1
                     logger.info(f"✅ {category_name} 메시지 발송 성공")
@@ -162,7 +159,7 @@ def main():
         macro_indicators_html = macro_indicators.replace("**매크로 경제 지표:**", "<b>📈 매크로 경제 지표</b>")
         if not macro_indicators_html.startswith("<b>"):
             macro_indicators_html = f"<b>📈 매크로 경제 지표</b>\n{macro_indicators_html}"
-        macro_message = f"{header}{macro_indicators_html}"
+        macro_message = macro_indicators_html
         if notifier.send_message(macro_message):
             messages_sent += 1
             logger.info("✅ 매크로 경제 지표 메시지 발송 성공")
@@ -170,38 +167,12 @@ def main():
             messages_failed += 1
             logger.error("❌ 매크로 경제 지표 메시지 발송 실패")
         
-        # 2-1. 경제 캘린더 메시지 전송
-        economic_calendar_html = economic_calendar.replace("**📅 오늘/내일 중요 경제 지표 일정:**", "<b>📅 오늘/내일 중요 경제 지표 일정</b>")
-        economic_calendar_html = economic_calendar_html.replace("**📅 경제 캘린더:**", "<b>📅 경제 캘린더</b>")
-        if not economic_calendar_html.startswith("<b>"):
-            economic_calendar_html = f"<b>📅 경제 캘린더</b>\n{economic_calendar_html}"
-        calendar_message = f"{header}{economic_calendar_html}"
-        if notifier.send_message(calendar_message):
-            messages_sent += 1
-            logger.info("✅ 경제 캘린더 메시지 발송 성공")
-        else:
-            messages_failed += 1
-            logger.error("❌ 경제 캘린더 메시지 발송 실패")
-        
-        # 2-2. 전문가 시장 전망 메시지 전송
-        market_outlook_html = market_outlook.replace("**📊 전문가 시장 전망 (Seeking Alpha):**", "<b>📊 전문가 시장 전망 (Seeking Alpha)</b>")
-        market_outlook_html = market_outlook_html.replace("**📊 전문가 시장 전망:**", "<b>📊 전문가 시장 전망</b>")
-        if not market_outlook_html.startswith("<b>"):
-            market_outlook_html = f"<b>📊 전문가 시장 전망</b>\n{market_outlook_html}"
-        outlook_message = f"{header}{market_outlook_html}"
-        if notifier.send_message(outlook_message):
-            messages_sent += 1
-            logger.info("✅ 전문가 시장 전망 메시지 발송 성공")
-        else:
-            messages_failed += 1
-            logger.error("❌ 전문가 시장 전망 메시지 발송 실패")
-        
         # 3. 주요 시장 뉴스 메시지 전송
         news_translated_html = news_translated.replace("**주요 시장 뉴스 헤드라인:**", "<b>📰 주요 시장 뉴스 (제목+요약)</b>")
         news_translated_html = news_translated_html.replace("**주요 시장 뉴스 (제목+요약):**", "<b>📰 주요 시장 뉴스 (제목+요약)</b>")
         if not news_translated_html.startswith("<b>"):
             news_translated_html = f"<b>📰 주요 시장 뉴스 (제목+요약)</b>\n{news_translated_html}"
-        news_message = f"{header}{news_translated_html}"
+        news_message = news_translated_html
         if notifier.send_message(news_message):
             messages_sent += 1
             logger.info("✅ 주요 시장 뉴스 메시지 발송 성공")
@@ -211,7 +182,7 @@ def main():
         
         # 4. AI 투자 인사이트 메시지 전송
         ai_briefing_html = f"<b>🤖 AI 투자 인사이트</b>\n{ai_briefing}"
-        ai_message = f"{header}{ai_briefing_html}"
+        ai_message = ai_briefing_html
         if notifier.send_message(ai_message):
             messages_sent += 1
             logger.info("✅ AI 투자 인사이트 메시지 발송 성공")
@@ -219,11 +190,18 @@ def main():
             messages_failed += 1
             logger.error("❌ AI 투자 인사이트 메시지 발송 실패")
         
-        # 5. 바리케이트 메시지 전송 (메시지 뭉치 종료 표시)
+        # 5. 바리케이트 메시지 전송 (메시지 뭉치 종료 표시) - 토큰 사용량 정보 포함
+        token_info_text = ""
+        if token_usage and token_usage.get('total_tokens', 0) > 0:
+            prompt_tokens = token_usage.get('prompt_tokens', 0)
+            completion_tokens = token_usage.get('completion_tokens', 0)
+            total_tokens = token_usage.get('total_tokens', 0)
+            token_info_text = f"\n<b>💾 LLM 토큰 사용량:</b> 입력 {prompt_tokens:,}개, 출력 {completion_tokens:,}개, 총 {total_tokens:,}개"
+        
         barrier_end_message = f"""<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
 <b>🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧</b>
 <b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
-<b>📊 리포트 종료</b>
+<b>📊 리포트 종료</b>{token_info_text}
 <b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>"""
         
         if notifier.send_message(barrier_end_message):

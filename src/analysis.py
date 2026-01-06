@@ -1,12 +1,15 @@
 """
 기술적 분석 모듈
 yfinance를 사용하여 주가 데이터 수집 및 기간별 수익률 계산
+기술적 지표(RSI, 이동평균선 괴리율) 계산 포함
 """
 import yfinance as yf
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
 import pytz
+import pandas as pd
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -142,9 +145,114 @@ def get_historical_price(ticker: str, days_ago: int) -> Optional[float]:
         return None
 
 
+def calculate_rsi(prices: pd.Series, period: int = 14) -> Optional[float]:
+    """
+    RSI (Relative Strength Index) 계산
+    
+    Args:
+        prices: 종가 시리즈
+        period: RSI 기간 (기본값: 14일)
+    
+    Returns:
+        RSI 값 (0~100) 또는 None
+    """
+    try:
+        if len(prices) < period + 1:
+            return None
+        
+        # 가격 변화량 계산
+        delta = prices.diff()
+        
+        # 상승분과 하락분 분리
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        
+        # RS (Relative Strength) 계산
+        rs = gain / loss
+        
+        # RSI 계산
+        rsi = 100 - (100 / (1 + rs))
+        
+        # 최신 RSI 값 반환
+        return float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else None
+    except Exception as e:
+        logger.error(f"RSI 계산 실패: {e}")
+        return None
+
+
+def calculate_ma_deviation(current_price: float, ma20: Optional[float]) -> Optional[float]:
+    """
+    20일 이동평균선 괴리율 계산
+    
+    Args:
+        current_price: 현재가
+        ma20: 20일 이동평균선 가격
+    
+    Returns:
+        괴리율 (%) 또는 None
+    """
+    try:
+        if ma20 is None or ma20 == 0:
+            return None
+        deviation = (current_price / ma20) * 100
+        return float(deviation)
+    except Exception as e:
+        logger.error(f"이동평균선 괴리율 계산 실패: {e}")
+        return None
+
+
+def get_technical_indicators(ticker: str) -> Dict[str, Optional[float]]:
+    """
+    기술적 지표 계산 (RSI, 20일 이동평균선, 괴리율)
+    
+    Args:
+        ticker: 주식 티커 심볼
+    
+    Returns:
+        {
+            'rsi': RSI 값 (0~100),
+            'ma20': 20일 이동평균선 가격,
+            'ma_deviation': 20일 이동평균선 괴리율 (%)
+        }
+    """
+    try:
+        stock = get_stock_data(ticker)
+        if stock is None:
+            return {'rsi': None, 'ma20': None, 'ma_deviation': None}
+        
+        # 최소 30일치 데이터 필요 (RSI 14일 + MA 20일 + 여유)
+        hist = stock.history(period="2mo")
+        
+        if hist.empty or len(hist) < 30:
+            logger.warning(f"{ticker}: 기술적 지표 계산을 위한 데이터 부족 ({len(hist)}일)")
+            return {'rsi': None, 'ma20': None, 'ma_deviation': None}
+        
+        # Close 가격 사용
+        closes = hist['Close']
+        current_price = float(closes.iloc[-1])
+        
+        # RSI 계산
+        rsi = calculate_rsi(closes, period=14)
+        
+        # 20일 이동평균선 계산
+        ma20 = float(closes.rolling(window=20).mean().iloc[-1]) if len(closes) >= 20 else None
+        
+        # 괴리율 계산
+        ma_deviation = calculate_ma_deviation(current_price, ma20)
+        
+        return {
+            'rsi': rsi,
+            'ma20': ma20,
+            'ma_deviation': ma_deviation
+        }
+    except Exception as e:
+        logger.error(f"{ticker} 기술적 지표 계산 실패: {e}")
+        return {'rsi': None, 'ma20': None, 'ma_deviation': None}
+
+
 def calculate_returns(ticker: str) -> Dict:
     """
-    기간별 수익률을 계산
+    기간별 수익률 및 기술적 지표를 계산
     
     Args:
         ticker: 주식 티커 심볼
@@ -157,13 +265,19 @@ def calculate_returns(ticker: str) -> Dict:
                 '1D': 수익률%,
                 '2D': 수익률%,
                 ...
+            },
+            'technical': {
+                'rsi': RSI 값,
+                'ma20': 20일 이동평균선,
+                'ma_deviation': 20일 이동평균선 괴리율 (%)
             }
         }
     """
     result = {
         'ticker': ticker,
         'current_price': None,
-        'returns': {}
+        'returns': {},
+        'technical': {}
     }
     
     # 현재가 조회
@@ -178,11 +292,9 @@ def calculate_returns(ticker: str) -> Dict:
     # 참고: 1개월 = 약 20-22거래일, 1년 = 약 250거래일 (한국 시장 기준)
     periods = {
         '1D': 1,      # 1거래일 전
-        '2D': 2,      # 2거래일 전
         '3D': 3,      # 3거래일 전
         '1W': 5,      # 1주일 = 약 5거래일 (기존 7에서 조정)
         '1M': 20,     # 1개월 = 약 20거래일 (기존 30에서 조정)
-        '2M': 40,     # 2개월 = 약 40거래일 (기존 60에서 조정)
         '3M': 60,     # 3개월 = 약 60거래일 (기존 90에서 조정)
         '6M': 120,    # 6개월 = 약 120거래일 (기존 180에서 조정)
         '1Y': 250     # 1년 = 약 250거래일 (기존 365에서 조정)
@@ -199,6 +311,10 @@ def calculate_returns(ticker: str) -> Dict:
         except Exception as e:
             logger.error(f"{ticker} {period_name} 수익률 계산 실패: {e}")
             result['returns'][period_name] = "오류"
+    
+    # 기술적 지표 계산
+    technical = get_technical_indicators(ticker)
+    result['technical'] = technical
     
     return result
 
@@ -335,6 +451,7 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 ticker = result.get('ticker', 'Unknown')
                 current_price = result.get('current_price', 'N/A')
                 returns = result.get('returns', {})
+                technical = result.get('technical', {})
                 
                 # 티커 한글 이름
                 ticker_name = ticker_names.get(ticker, ticker)
@@ -357,11 +474,9 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 # 주요 수익률 계산
                 period_mapping = {
                     '24h': ('1D', '1일'),
-                    '2d': ('2D', '2일'),
                     '3d': ('3D', '3일'),
                     '7d': ('1W', '1주'),
                     '1m': ('1M', '1개월'),
-                    '2m': ('2M', '2개월'),
                     '3m': ('3M', '3개월'),
                     '6m': ('6M', '6개월'),
                     '1y': ('1Y', '1년')
@@ -381,8 +496,34 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 else:
                     returns_str = "N/A"
                 
-                # 종목명과 티커명 강조 효과
-                summary_line = f"📊 <b>{ticker_name}</b> <code>({ticker})</code>\n   현재가: <b>{price_str}</b>\n   변동률:{returns_str}"
+                # 기술적 지표 포맷팅 (AI 전달용)
+                technical_parts = []
+                rsi = technical.get('rsi')
+                ma_deviation = technical.get('ma_deviation')
+                
+                if rsi is not None:
+                    rsi_status = ""
+                    if rsi >= 70:
+                        rsi_status = " [과매수]"
+                    elif rsi <= 30:
+                        rsi_status = " [과매도]"
+                    technical_parts.append(f"RSI: {rsi:.1f}{rsi_status}")
+                
+                if ma_deviation is not None:
+                    ma_status = ""
+                    if ma_deviation > 105:
+                        ma_status = " [단기 과열]"
+                    elif ma_deviation < 95:
+                        ma_status = " [침체]"
+                    technical_parts.append(f"20일 이격도: {ma_deviation:.1f}%{ma_status}")
+                
+                if technical_parts:
+                    technical_str = " | ".join(technical_parts)
+                else:
+                    technical_str = "N/A"
+                
+                # 종목명과 티커명 강조 효과 (기술적 지표 포함)
+                summary_line = f"📊 <b>{ticker_name}</b> <code>({ticker})</code>\n   현재가: <b>{price_str}</b>\n   변동률:{returns_str}\n   기술적 지표: {technical_str}"
                 summary_parts.append(summary_line)
             
             # 카테고리별 메시지 생성
@@ -463,14 +604,12 @@ def get_stock_summary(tickers: List[str]) -> str:
             price_str = str(current_price)
         
         # 주요 수익률 계산 (Python 내부 연산 완료)
-        # [24h, 2d, 3d, 7d, 1m, 2m, 3m, 6m, 1y]
+        # [24h, 3d, 7d, 1m, 3m, 6m, 1y]
         period_mapping = {
             '24h': ('1D', '1일'),
-            '2d': ('2D', '2일'),
             '3d': ('3D', '3일'),
             '7d': ('1W', '1주'),
             '1m': ('1M', '1개월'),
-            '2m': ('2M', '2개월'),
             '3m': ('3M', '3개월'),
             '6m': ('6M', '6개월'),
             '1y': ('1Y', '1년')

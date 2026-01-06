@@ -4,15 +4,19 @@
 # possession, interest, domestic, overseas
 
 tickers_possession_domestic: #보유주식_국내
-  - "360200.KS" # ACE 미국S&P500
   - "379810.KS" # KODEX 미국나스닥100
-  - "484320.KS" # KODEX 미국AI전력핵심인프라
+  - "390390.KS" # KODEX 미국반도체
+  - "465580.KS" # KODEX ACE 미국빅테크TOP7 Plus
+  - "360200.KS" # ACE 미국S&P500
+  - "487230.KS" # KODEX 미국AI전력핵심인프라
   - "411060.KS" # ACE KRX금현물
+  - "438080.KS" # ACE 미국S&P500미국채혼합50액티브
 
 tickers_possession_overseas: #보유주식_해외
 
 tickers_interest_domestic: #관심주식_국내
   - "449170.KS" # TIGER KOFR금리액티브(합성)
+  - "464310.KS" # TIGER 글로벌AI&로보틱스 INDXX
   - "005930.KS" # 삼성전자 (코스피)
   - "000660.KS" # SK하이닉스 (코스피)
 
