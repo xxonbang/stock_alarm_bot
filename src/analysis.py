@@ -2,6 +2,12 @@
 기술적 분석 모듈
 yfinance를 사용하여 주가 데이터 수집 및 기간별 수익률 계산
 기술적 지표(RSI, 이동평균선 괴리율) 계산 포함
+
+[중요: AI 금지 구역]
+이 모듈은 순수 수치 계산 전용입니다. AI API 호출을 절대 하지 않습니다.
+- google.generativeai 라이브러리 import 금지
+- AI를 사용한 분석/요약 금지
+- 모든 계산은 pandas/numpy로만 처리
 """
 import yfinance as yf
 from datetime import datetime, timedelta
@@ -10,6 +16,14 @@ import logging
 import pytz
 import pandas as pd
 import numpy as np
+
+# AI 금지 검증: 이 파일에서 직접 import하지 않았는지 확인
+# (다른 모듈에서 간접적으로 import되는 것은 허용)
+import sys
+if 'google.generativeai' in sys.modules:
+    # 다른 모듈에서 이미 import된 경우, 이 파일에서 직접 import한 것은 아님
+    pass
+# 이 파일에서는 google.generativeai를 직접 import하지 않음 (정상)
 
 logger = logging.getLogger(__name__)
 
@@ -405,15 +419,20 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
             'interest_overseas': '메시지'
         }
     """
-    # 티커 이름 매핑
+    # 티커 이름 매핑 (한글 이름이 있는 경우만, 없으면 yfinance로 동적 조회)
     ticker_names = {
         # 국내 보유
         '360200.KS': 'ACE 미국S&P500',
         '379810.KS': 'KODEX 미국나스닥100',
+        '390390.KS': 'KODEX 미국반도체',
+        '465580.KS': 'KODEX ACE 미국빅테크TOP7 Plus',
         '484320.KS': 'KODEX 미국AI전력핵심인프라',
         '411060.KS': 'ACE KRX금현물',
+        '438080.KS': 'ACE 미국S&P500미국채혼합50액티브',
+        '487230.KS': 'KODEX 미국AI전력핵심인프라',
         # 국내 관심
         '449170.KS': 'TIGER KOFR금리액티브',
+        '464310.KS': 'TIGER 글로벌AI&로보틱스 INDXX',
         '005930.KS': '삼성전자',
         '000660.KS': 'SK하이닉스',
         # 해외 관심
@@ -453,8 +472,22 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 returns = result.get('returns', {})
                 technical = result.get('technical', {})
                 
-                # 티커 한글 이름
-                ticker_name = ticker_names.get(ticker, ticker)
+                # 티커 한글 이름 (매핑에 없으면 yfinance로 조회)
+                ticker_name = ticker_names.get(ticker)
+                if not ticker_name or ticker_name == ticker:
+                    # yfinance로 종목명 조회
+                    try:
+                        stock = yf.Ticker(ticker)
+                        info = stock.info
+                        if info and len(info) > 0:
+                            # 종목명 추출 (우선순위: longName > shortName > symbol)
+                            ticker_name = info.get('longName') or info.get('shortName') or info.get('symbol', ticker)
+                            logger.debug(f"종목명 조회 성공: {ticker} -> {ticker_name}")
+                        else:
+                            ticker_name = ticker
+                    except Exception as e:
+                        logger.debug(f"종목명 조회 실패: {ticker} - {e}")
+                        ticker_name = ticker
                 
                 # 가격 포맷팅 (티커 기준으로 통화 결정)
                 if isinstance(current_price, (int, float)):

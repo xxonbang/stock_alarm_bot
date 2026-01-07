@@ -24,7 +24,8 @@ from src.crawler import (
     get_market_news_with_context, 
     get_market_indicators, 
     translate_headlines,
-    get_us_top_movers
+    get_us_top_movers,
+    get_korea_hot_themes
 )
 from src.ai_researcher import create_researcher
 from src.notifier import create_notifier
@@ -77,37 +78,49 @@ def main():
         us_top_movers = get_us_top_movers(max_items=10)
         logger.info("미국 Top Movers 수집 완료")
         
+        # Step 2-2: 한국 Hot Themes 수집 (급등주 누락 방지)
+        logger.info("\n[Step 2-2] 한국 Hot Themes 수집 시작...")
+        korea_hot_themes = get_korea_hot_themes(max_themes=3)
+        logger.info("한국 Hot Themes 수집 완료")
+        
         # Step 3: 뉴스 제목+요약 수집 (Python 크롤링, 필터링 적용)
         logger.info("\n[Step 3] 시장 뉴스 수집 시작 (제목+요약, 필터링 적용)...")
         news_with_context = get_market_news_with_context(max_items=10)
         logger.info("뉴스 수집 완료")
         
-        # Step 4: AI 초기화 (뉴스 번역 및 요약에 사용)
-        logger.info("\n[Step 4] AI 초기화...")
-        researcher = create_researcher(settings.google_api_key)
+        # Step 4: 뉴스 포맷팅 (API 호출 없음 - Batch Processing 구조)
+        logger.info("\n[Step 4] 뉴스 포맷팅 시작...")
+        news_formatted = translate_headlines(news_with_context)
+        logger.info("뉴스 포맷팅 완료")
         
-        # Step 5: 뉴스 한글 번역
-        logger.info("\n[Step 5] 뉴스 한글 번역 시작...")
-        news_translated = translate_headlines(news_with_context, researcher)
-        logger.info("뉴스 번역 완료")
-        
-        # Step 6: 수집된 데이터 통합 (AI 분석용)
-        logger.info("\n[Step 6] 수집된 데이터 통합...")
+        # Step 5: 수집된 데이터 통합 (AI 분석용 - Batch Processing)
+        logger.info("\n[Step 5] 수집된 데이터 통합 (Batch Processing)...")
         # AI 분석을 위해 모든 카테고리 메시지를 합침
         all_stock_summaries = "\n\n".join([msg for msg in stock_summaries.values() if msg])
-        collected_data = f"""{all_stock_summaries}
+        collected_data = f"""[PORTFOLIO_DATA]
+{all_stock_summaries}
 
+[MACRO_DATA]
 {macro_indicators}
 
+[US_TOP_MOVERS]
 {us_top_movers}
 
-{news_translated}"""
+[TODAYS_HOT_THEMES]
+{korea_hot_themes}
+
+[NEWS_DATA]
+{news_formatted}"""
         logger.info(f"통합 데이터 준비 완료: {len(collected_data)}자")
         
-        # Step 7: AI 요약 코멘트 생성 (AI는 요약만 수행)
-        logger.info("\n[Step 7] AI 요약 코멘트 생성 시작...")
+        # Step 6: AI 초기화 (단 1회 API 호출을 위한 준비)
+        logger.info("\n[Step 6] AI 초기화...")
+        researcher = create_researcher(settings.google_api_key)
+        
+        # Step 7: AI 일일 리포트 생성 (단 1회 API 호출 - Batch Processing)
+        logger.info("\n[Step 7] AI 일일 리포트 생성 시작 (단 1회 API 호출)...")
         ai_briefing, token_usage = researcher.generate_briefing(collected_data)
-        logger.info("AI 요약 코멘트 생성 완료")
+        logger.info("AI 일일 리포트 생성 완료")
         
         # Step 8: 텔레그램 발송 (각 카테고리별로 개별 메시지 전송)
         logger.info("\n[Step 8] 텔레그램 메시지 발송 시작...")
@@ -168,11 +181,11 @@ def main():
             logger.error("❌ 매크로 경제 지표 메시지 발송 실패")
         
         # 3. 주요 시장 뉴스 메시지 전송
-        news_translated_html = news_translated.replace("**주요 시장 뉴스 헤드라인:**", "<b>📰 주요 시장 뉴스 (제목+요약)</b>")
-        news_translated_html = news_translated_html.replace("**주요 시장 뉴스 (제목+요약):**", "<b>📰 주요 시장 뉴스 (제목+요약)</b>")
-        if not news_translated_html.startswith("<b>"):
-            news_translated_html = f"<b>📰 주요 시장 뉴스 (제목+요약)</b>\n{news_translated_html}"
-        news_message = news_translated_html
+        news_formatted_html = news_formatted.replace("**주요 시장 뉴스 헤드라인:**", "<b>📰 주요 시장 뉴스 (제목+요약)</b>")
+        news_formatted_html = news_formatted_html.replace("**주요 시장 뉴스 (제목+요약):**", "<b>📰 주요 시장 뉴스 (제목+요약)</b>")
+        if not news_formatted_html.startswith("<b>"):
+            news_formatted_html = f"<b>📰 주요 시장 뉴스 (제목+요약)</b>\n{news_formatted_html}"
+        news_message = news_formatted_html
         if notifier.send_message(news_message):
             messages_sent += 1
             logger.info("✅ 주요 시장 뉴스 메시지 발송 성공")

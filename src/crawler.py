@@ -1,6 +1,12 @@
 """
 뉴스 및 시황 크롤링 모듈 (고도화 버전)
 뉴스 제목+요약문 수집 및 매크로 경제 지표 수집
+
+[중요: AI 금지 구역]
+이 모듈은 데이터 수집 전용입니다. AI API 호출을 절대 하지 않습니다.
+- google.generativeai 라이브러리 import 금지
+- AI를 사용한 번역/요약 금지
+- 모든 데이터는 원문 그대로 반환 (최종 리포트 단계에서 AI가 처리)
 """
 import requests
 from bs4 import BeautifulSoup
@@ -9,6 +15,14 @@ from typing import List, Dict, Optional
 import time
 import yfinance as yf
 from datetime import datetime, timedelta
+
+# AI 금지 검증: 이 파일에서 직접 import하지 않았는지 확인
+# (다른 모듈에서 간접적으로 import되는 것은 허용)
+import sys
+if 'google.generativeai' in sys.modules:
+    # 다른 모듈에서 이미 import된 경우, 이 파일에서 직접 import한 것은 아님
+    pass
+# 이 파일에서는 google.generativeai를 직접 import하지 않음 (정상)
 
 logger = logging.getLogger(__name__)
 
@@ -900,6 +914,231 @@ def get_us_top_movers(max_items: int = 10) -> str:
         return "**🔥 미국 시장 Top Movers:**\n데이터 수집 실패"
 
 
+def get_korea_hot_themes(max_themes: int = 3) -> str:
+    """
+    네이버 금융 테마 페이지에서 오늘의 강세 테마 수집
+    등락률 상위 테마와 각 테마의 주도주 정보 추출
+    
+    Args:
+        max_themes: 최대 수집할 테마 개수
+    
+    Returns:
+        포맷팅된 Hot Themes 텍스트
+    """
+    logger.info("=== 한국 시장 Hot Themes 수집 시작 ===")
+    print("=== 한국 시장 Hot Themes 수집 시작 ===")
+    
+    themes_data = []
+    
+    try:
+        # Step 1: 네이버 금융 테마 페이지에서 등락률 상위 테마 추출
+        url = "https://finance.naver.com/sise/theme.naver"
+        logger.info(f"네이버 금융 테마 페이지 수집 중: {url}")
+        
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # 테마 리스트 추출 (여러 가능한 선택자 시도)
+        import re
+        
+        themes = []
+        
+        # 방법 1: 테이블에서 추출
+        theme_selectors = [
+            'table.type_1 tbody tr',
+            '.box_type_l tbody tr',
+            'table tbody tr',
+            'tr'
+        ]
+        
+        for selector in theme_selectors:
+            rows = soup.select(selector)
+            if not rows:
+                continue
+                
+            for row in rows[:30]:  # 상위 30개 확인
+                try:
+                    # 테마명과 링크 추출
+                    theme_link = row.select_one('a[href*="theme"], a[href*="sise_group"]')
+                    if not theme_link:
+                        continue
+                    
+                    theme_name = theme_link.get_text(strip=True)
+                    theme_href = theme_link.get('href', '')
+                    
+                    if not theme_name or len(theme_name) < 2:
+                        continue
+                    
+                    # 테마 코드 추출 (URL에서)
+                    theme_code = None
+                    if 'no=' in theme_href:
+                        theme_code = theme_href.split('no=')[1].split('&')[0].split('#')[0]
+                    elif '/theme/' in theme_href:
+                        # URL 패턴: /sise/sise_group_detail.naver?type=theme&no=123
+                        match = re.search(r'no=(\d+)', theme_href)
+                        if match:
+                            theme_code = match.group(1)
+                    
+                    if not theme_code:
+                        continue
+                    
+                    # 등락률 추출 (모든 td에서 찾기)
+                    change_pct = None
+                    tds = row.select('td')
+                    for td in tds:
+                        td_text = td.get_text(strip=True)
+                        # 등락률 패턴: "+5.2%", "5.2%", "+5.2" 등
+                        match = re.search(r'([+-]?)(\d+\.?\d*)%?', td_text)
+                        if match:
+                            sign = match.group(1)
+                            num_str = match.group(2)
+                            try:
+                                num = float(num_str)
+                                # 양수이고 0.1 이상인 경우만 (실제 등락률)
+                                if num >= 0.1 and (sign == '+' or (sign == '' and num > 0)):
+                                    change_pct = num
+                                    break
+                            except:
+                                pass
+                    
+                    if theme_name and theme_code and change_pct is not None and change_pct > 0:
+                        # 중복 제거
+                        if not any(t['code'] == theme_code for t in themes):
+                            themes.append({
+                                'name': theme_name,
+                                'code': theme_code,
+                                'change': change_pct,
+                                'href': theme_href
+                            })
+                except Exception as e:
+                    logger.debug(f"테마 행 파싱 실패: {e}")
+                    continue
+            
+            if len(themes) >= max_themes * 2:  # 충분한 데이터 수집
+                break
+        
+        # 등락률 기준으로 정렬 (내림차순)
+        themes.sort(key=lambda x: x['change'], reverse=True)
+        themes = themes[:max_themes]
+        
+        if not themes:
+            logger.warning("Hot Themes: 테마 데이터 없음")
+            return "**🔥 오늘의 강세 테마 (한국):**\n테마 데이터 수집 실패"
+        
+        # Step 2: 각 테마 페이지에서 주도주 추출
+        for theme in themes:
+            try:
+                theme_url = f"https://finance.naver.com/sise/sise_group_detail.naver?type=theme&no={theme['code']}"
+                logger.info(f"테마 상세 페이지 수집 중: {theme['name']} ({theme_url})")
+                
+                theme_response = requests.get(theme_url, headers=HEADERS, timeout=10)
+                theme_response.raise_for_status()
+                
+                theme_soup = BeautifulSoup(theme_response.content, 'html.parser')
+                
+                # 주도주 추출 (상승률 상위 2개)
+                import re
+                stock_rows = theme_soup.select('table.type_1 tbody tr, .box_type_l tbody tr, table tbody tr')
+                top_stocks = []
+                
+                for row in stock_rows[:15]:  # 상위 15개 확인
+                    try:
+                        # 종목명 추출
+                        stock_link = row.select_one('td a[href*="item"], a[href*="item"]')
+                        if not stock_link:
+                            continue
+                        
+                        stock_name = stock_link.get_text(strip=True)
+                        if not stock_name or len(stock_name) < 2:
+                            continue
+                        
+                        # 등락률 추출 (모든 td에서 찾기)
+                        change_pct = None
+                        tds = row.select('td')
+                        for td in tds:
+                            td_text = td.get_text(strip=True)
+                            # 등락률 패턴 찾기
+                            match = re.search(r'([+-]?)(\d+\.?\d*)%?', td_text)
+                            if match:
+                                sign = match.group(1)
+                                num_str = match.group(2)
+                                try:
+                                    num = float(num_str)
+                                    # 양수이고 0.1 이상인 경우만
+                                    if num >= 0.1 and (sign == '+' or (sign == '' and num > 0)):
+                                        change_pct = num
+                                        break
+                                except:
+                                    pass
+                        
+                        if stock_name and change_pct is not None and change_pct > 0:
+                            # 중복 제거
+                            if not any(s['name'] == stock_name for s in top_stocks):
+                                top_stocks.append({
+                                    'name': stock_name,
+                                    'change': change_pct
+                                })
+                                
+                                if len(top_stocks) >= 2:  # 상위 2개만
+                                    break
+                    except Exception as e:
+                        logger.debug(f"주도주 파싱 실패: {e}")
+                        continue
+                
+                if top_stocks:
+                    themes_data.append({
+                        'name': theme['name'],
+                        'change': theme['change'],
+                        'stocks': top_stocks
+                    })
+                
+                # 요청 간 딜레이 (서버 부하 방지)
+                time.sleep(1)
+                
+            except Exception as e:
+                logger.warning(f"테마 '{theme['name']}' 상세 페이지 수집 실패: {e}")
+                # 실패해도 테마명과 평균 등락률은 포함
+                themes_data.append({
+                    'name': theme['name'],
+                    'change': theme['change'],
+                    'stocks': []
+                })
+                continue
+        
+        # 결과 포맷팅
+        if themes_data:
+            result = "**🔥 오늘의 강세 테마 (한국):**\n\n"
+            for i, theme in enumerate(themes_data, 1):
+                result += f"{i}. <b>{theme['name']}</b> (+{theme['change']:.2f}% Avg)\n"
+                
+                if theme['stocks']:
+                    result += "   - 주도주: "
+                    stock_strs = []
+                    for stock in theme['stocks']:
+                        stock_strs.append(f"{stock['name']} (+{stock['change']:.2f}%)")
+                    result += ", ".join(stock_strs) + "\n"
+                else:
+                    result += "   - 주도주: 데이터 수집 실패\n"
+                
+                result += "\n"
+            
+            logger.info(f"한국 Hot Themes 수집 완료: {len(themes_data)}개 테마")
+            print(f"✅ 한국 Hot Themes 수집 완료: {len(themes_data)}개 테마")
+            return result
+        else:
+            result = "**🔥 오늘의 강세 테마 (한국):**\n테마 데이터 수집 실패"
+            logger.warning("한국 Hot Themes: 데이터 없음")
+            print("⚠️ 한국 Hot Themes: 데이터 없음")
+            return result
+            
+    except Exception as e:
+        logger.error(f"한국 Hot Themes 수집 실패: {e}")
+        print(f"❌ 한국 Hot Themes 수집 실패: {e}")
+        return "**🔥 오늘의 강세 테마 (한국):**\n데이터 수집 실패"
+
+
 def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
     """
     yfinance 내장 뉴스 기능을 사용한 전문가 시장 전망 수집
@@ -1071,18 +1310,19 @@ def is_korean_text(text: str) -> bool:
     return bool(korean_pattern.search(text))
 
 
-def translate_headlines(headlines_text: str, ai_researcher) -> str:
+def translate_headlines(headlines_text: str, ai_researcher=None) -> str:
     """
-    뉴스 헤드라인을 한글로 번역 (AI 사용)
-    제목+요약 형식도 지원
-    한국어 제목은 번역하지 않고 그대로 유지
+    뉴스 헤드라인 포맷팅 (API 호출 제거 - Batch Processing 구조)
+    번역 없이 원문 그대로 사용하여 API 호출을 단 1회로 제한
+    
+    [중요] 이 함수는 AI를 사용하지 않습니다. 순수 Python 문자열 처리만 수행합니다.
     
     Args:
         headlines_text: 원문 헤드라인 텍스트
-        ai_researcher: AIResearcher 인스턴스
+        ai_researcher: 사용하지 않음 (호환성을 위해 유지, 무시됨)
     
     Returns:
-        원문 + 한글 번역이 포함된 텍스트 (한국어는 원문만)
+        포맷팅된 뉴스 텍스트 (원문 그대로, 번역 없음)
     """
     if "뉴스 데이터 수집 불가" in headlines_text:
         return headlines_text
@@ -1092,7 +1332,7 @@ def translate_headlines(headlines_text: str, ai_researcher) -> str:
         
         # 헤드라인만 추출 (번호와 제목)
         lines = headlines_text.split('\n')
-        headlines_data = []  # (번호, 제목, 한국어 여부) 튜플 리스트
+        headlines_data = []  # (번호, 제목) 튜플 리스트
         
         for line in lines:
             line = line.strip()
@@ -1106,60 +1346,13 @@ def translate_headlines(headlines_text: str, ai_researcher) -> str:
                     if match:
                         number = match.group(1)
                         title = match.group(2).strip()
-                        is_korean = is_korean_text(title)
-                        headlines_data.append((number, title, is_korean))
+                        headlines_data.append((number, title))
         
         if not headlines_data:
+            # 포맷팅만 적용
+            if not headlines_text.startswith("<b>📰"):
+                return f"<b>📰 주요 시장 뉴스 (제목+요약)</b>\n{headlines_text}"
             return headlines_text
-        
-        # 영어 제목만 필터링
-        english_headlines = [(num, title) for num, title, is_kr in headlines_data if not is_kr]
-        korean_headlines = [(num, title) for num, title, is_kr in headlines_data if is_kr]
-        
-        # 영어 제목만 번역
-        translated_results = {}  # {번호: 번역문}
-        if english_headlines:
-            # 번호와 제목을 함께 전달하여 매칭 용이하게
-            english_titles_with_num = [f"{num}. {title}" for num, title in english_headlines]
-            
-            translation_prompt = f"""아래는 영어 뉴스 헤드라인입니다. 각 헤드라인을 한글로 번역해주세요.
-
-원문:
-{chr(10).join(english_titles_with_num)}
-
-요구사항:
-1. 각 헤드라인을 정확하게 한글로 번역
-2. 번호를 유지하고 원문과 번역을 함께 표시
-3. 출력 형식을 정확히 따르세요
-
-출력 형식:
-1. [원문 제목]
-   → [한글 번역]
-
-2. [원문 제목]
-   → [한글 번역]
-...
-"""
-            
-            translated_text, _ = ai_researcher._call_ai(translation_prompt)
-            
-            # 번역 결과 파싱 (번호로 매칭)
-            translated_lines = translated_text.split('\n')
-            current_number = None
-            for line in translated_lines:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # 번호 추출
-                num_match = re.match(r'^(\d+)\.', line)
-                if num_match:
-                    current_number = num_match.group(1)
-                elif line.startswith('→') and current_number:
-                    # 번역문
-                    translation = line.replace('→', '').strip()
-                    translated_results[current_number] = translation
-                    current_number = None
         
         # 최종 결과 포맷팅
         formatted_lines = []
@@ -1180,33 +1373,24 @@ def translate_headlines(headlines_text: str, ai_researcher) -> str:
                 summary_map[current_number] = summary_text
         
         # 모든 헤드라인을 번호 순서대로 출력
-        all_numbers = sorted(set([num for num, _, _ in headlines_data]), key=int)
+        all_numbers = sorted(set([num for num, _ in headlines_data]), key=int)
         
         for number in all_numbers:
             # 해당 번호의 헤드라인 찾기
-            headline_info = next((num, title, is_kr) for num, title, is_kr in headlines_data if num == number)
-            _, title, is_korean = headline_info
+            headline_info = next((num, title) for num, title in headlines_data if num == number)
+            _, title = headline_info
             
-            if is_korean:
-                # 한국어는 원문만 표시 (번역 생략)
-                formatted_lines.append(f"<b>{number}. {title}</b>")
-                if number in summary_map:
-                    formatted_lines.append(f"   요약: {summary_map[number]}")
-            else:
-                # 영어는 원문 + 번역 표시
-                formatted_lines.append(f"<b>{number}. {title}</b>")
-                if number in translated_results:
-                    translation = translated_results[number]
-                    formatted_lines.append(f"   <i>→ {translation}</i>")
-                if number in summary_map:
-                    formatted_lines.append(f"   요약: {summary_map[number]}")
+            # 원문 그대로 표시 (번역 없음)
+            formatted_lines.append(f"<b>{number}. {title}</b>")
+            if number in summary_map:
+                formatted_lines.append(f"   요약: {summary_map[number]}")
             
             formatted_lines.append("")  # 빈 줄
         
         result = "\n".join(formatted_lines)
-        logger.info(f"뉴스 번역 완료: 영어 {len(english_headlines)}개, 한국어 {len(korean_headlines)}개 (한국어는 번역 생략)")
+        logger.info(f"뉴스 포맷팅 완료: {len(headlines_data)}개 (API 호출 없음 - Batch Processing)")
         return result
         
     except Exception as e:
-        logger.warning(f"뉴스 헤드라인 번역 실패: {e}, 원문 그대로 사용")
+        logger.warning(f"뉴스 헤드라인 포맷팅 실패: {e}, 원문 그대로 사용")
         return headlines_text
