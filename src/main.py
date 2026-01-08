@@ -5,9 +5,14 @@ Stock Insight Bot 메인 실행 파일
 import logging
 import sys
 import os
+import warnings
 from pathlib import Path
 from datetime import datetime
 import pytz
+
+# 불필요한 경고 메시지 필터링 (google-generativeai FutureWarning 등)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*google.generativeai.*")
 
 # gRPC DNS 리졸버 설정 (DNS 해석 실패 문제 해결)
 # c-ares 대신 OS의 기본 DNS 리졸버 사용
@@ -25,8 +30,11 @@ from src.crawler import (
     get_market_indicators, 
     translate_headlines,
     get_us_top_movers,
-    get_korea_hot_themes
+    get_korea_hot_themes,
+    get_hankyung_consensus,
+    get_google_news_rss
 )
+from src.analysis import get_tradingview_technical_summary
 from src.ai_researcher import create_researcher
 from src.notifier import create_notifier
 
@@ -83,6 +91,28 @@ def main():
         korea_hot_themes = get_korea_hot_themes(max_themes=3)
         logger.info("한국 Hot Themes 수집 완료")
         
+        # Step 2-3: 한경 컨센서스 수집 (국내 시장 재료)
+        logger.info("\n[Step 2-3] 한경 컨센서스 수집 시작...")
+        hankyung_consensus = get_hankyung_consensus()
+        logger.info("한경 컨센서스 수집 완료")
+        
+        # Step 2-4: Google News RSS 수집 (해외 시장 재료)
+        logger.info("\n[Step 2-4] Google News RSS 수집 시작...")
+        google_news = get_google_news_rss()
+        logger.info("Google News RSS 수집 완료")
+        
+        # Step 2-5: TradingView 기술적 분석 수집
+        logger.info("\n[Step 2-5] TradingView 기술적 분석 수집 시작...")
+        # 모든 종목 코드 추출
+        all_tickers = (
+            settings.tickers_possession_domestic +
+            settings.tickers_possession_overseas +
+            settings.tickers_interest_domestic +
+            settings.tickers_interest_overseas
+        )
+        tradingview_signals = get_tradingview_technical_summary(all_tickers[:10])  # 상위 10개만
+        logger.info("TradingView 기술적 분석 수집 완료")
+        
         # Step 3: 뉴스 제목+요약 수집 (Python 크롤링, 필터링 적용)
         logger.info("\n[Step 3] 시장 뉴스 수집 시작 (제목+요약, 필터링 적용)...")
         news_with_context = get_market_news_with_context(max_items=10)
@@ -108,6 +138,13 @@ def main():
 
 [TODAYS_HOT_THEMES]
 {korea_hot_themes}
+
+[MARKET_MATERIALS]
+{hankyung_consensus}
+{google_news}
+
+[TECHNICAL_SIGNALS]
+{tradingview_signals}
 
 [NEWS_DATA]
 {news_formatted}"""

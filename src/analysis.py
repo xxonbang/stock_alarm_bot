@@ -16,6 +16,16 @@ import logging
 import pytz
 import pandas as pd
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+logger = logging.getLogger(__name__)
+
+try:
+    from tradingview_ta import TA_Handler, Interval
+except ImportError:
+    TA_Handler = None
+    Interval = None
+    logger.warning("tradingview_ta 라이브러리가 설치되지 않았습니다. TradingView 기술적 분석 기능을 사용할 수 없습니다.")
 
 # AI 금지 검증: 이 파일에서 직접 import하지 않았는지 확인
 # (다른 모듈에서 간접적으로 import되는 것은 허용)
@@ -24,8 +34,6 @@ if 'google.generativeai' in sys.modules:
     # 다른 모듈에서 이미 import된 경우, 이 파일에서 직접 import한 것은 아님
     pass
 # 이 파일에서는 google.generativeai를 직접 import하지 않음 (정상)
-
-logger = logging.getLogger(__name__)
 
 
 def get_stock_data(ticker: str, period: str = "1y") -> Optional[yf.Ticker]:
@@ -335,7 +343,7 @@ def calculate_returns(ticker: str) -> Dict:
 
 def analyze_all_tickers(tickers: List[str]) -> List[Dict]:
     """
-    모든 티커에 대해 분석 수행
+    모든 티커에 대해 분석 수행 (멀티스레딩으로 속도 최적화)
     
     Args:
         tickers: 분석할 티커 리스트
@@ -344,10 +352,28 @@ def analyze_all_tickers(tickers: List[str]) -> List[Dict]:
         분석 결과 리스트
     """
     results = []
-    for ticker in tickers:
-        logger.info(f"분석 중: {ticker}")
-        result = calculate_returns(ticker)
-        results.append(result)
+    
+    # ThreadPoolExecutor를 사용하여 멀티스레딩으로 데이터 수집
+    # yfinance는 threads=True 옵션을 지원하지만, 여기서는 각 티커를 병렬로 처리
+    max_workers = min(len(tickers), 10)  # 최대 10개 스레드 (너무 많으면 API 제한 걸릴 수 있음)
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 모든 티커에 대해 비동기 작업 제출
+        future_to_ticker = {
+            executor.submit(calculate_returns, ticker): ticker 
+            for ticker in tickers
+        }
+        
+        # 완료된 작업부터 결과 수집
+        for future in as_completed(future_to_ticker):
+            ticker = future_to_ticker[future]
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                logger.error(f"{ticker} 분석 실패: {e}")
+                continue
+    
     return results
 
 
@@ -673,5 +699,164 @@ def get_stock_summary(tickers: List[str]) -> str:
     logger.info(f"주가 요약 텍스트 생성 완료: {len(summary_lines)}개 종목")
     
     return result_text
+
+
+def get_tradingview_technical_summary(tickers: List[str]) -> str:
+    """
+    TradingView 기술적 분석 신호 수집 (집단지성 기반)
+    
+    Args:
+        tickers: 종목 코드 리스트 (예: ['005930', 'TSLA'])
+    
+    Returns:
+        포맷팅된 TradingView 기술적 분석 텍스트
+    """
+    logger.info("=== TradingView 기술적 분석 수집 시작 ===")
+    print("=== TradingView 기술적 분석 수집 시작 ===")
+    
+    if TA_Handler is None or Interval is None:
+        logger.warning("tradingview_ta 라이브러리가 없어 TradingView 데이터를 수집할 수 없습니다.")
+        return "[TECHNICAL SIGNALS (Source: TradingView)]\nTradingView 라이브러리 미설치"
+    
+    signals = []
+    
+    for ticker in tickers:
+        try:
+            # 심볼 클렌징 및 거래소 매핑
+            original_ticker = ticker
+            symbol = ticker
+            exchange = "NASDAQ"
+            screener = "america"
+            
+            # 한국 주식 처리: .KS, .KQ 확장자 제거
+            # Exchange Auto-Discovery: 여러 거래소를 순차적으로 시도
+            korean_exchanges = ["KRX", "KOSPI", "KOSDAQ"]
+            is_korean_stock = False
+            
+            if '.KS' in ticker or '.KQ' in ticker:
+                symbol = ticker.replace('.KS', '').replace('.KQ', '').strip()
+                screener = "south-korea"
+                is_korean_stock = True
+                # 한국 주식은 숫자 6자리 심볼인 경우 여러 거래소를 시도
+                if symbol.isdigit() and len(symbol) == 6:
+                    exchange = korean_exchanges[0]  # 첫 번째로 시도할 거래소
+                else:
+                    exchange = "KRX"  # 기본값
+            # 암호화폐 처리
+            elif '-USD' in ticker or '-KRW' in ticker:
+                # TradingView는 암호화폐를 직접 지원하지 않으므로 스킵
+                logger.debug(f"TradingView {ticker}: 암호화폐는 지원하지 않음, 스킵")
+                continue
+            # 해외 주식 처리
+            elif ticker.startswith('^'):
+                symbol = ticker.replace('^', '').strip()
+                exchange = "NASDAQ"
+                screener = "america"
+            else:
+                # 기본값: 해외 주식으로 간주
+                symbol = ticker.strip()
+                exchange = "NASDAQ"
+                screener = "america"
+            
+            # 심볼이 비어있으면 스킵
+            if not symbol:
+                logger.warning(f"TradingView {ticker}: 심볼이 비어있음, 스킵")
+                continue
+            
+            # TradingView 분석 시도: Exchange Auto-Discovery
+            analysis = None
+            exchanges_to_try = [exchange]
+            
+            # 한국 주식인 경우 (심볼이 숫자 6자리): 여러 거래소를 순차적으로 시도
+            if is_korean_stock and symbol.isdigit() and len(symbol) == 6:
+                exchanges_to_try = korean_exchanges
+            # 해외 주식인 경우 NASDAQ 실패 시 NYSE로 재시도
+            elif exchange == "NASDAQ" and screener == "america":
+                exchanges_to_try = ["NASDAQ", "NYSE"]
+            
+            # 거래소 후보 리스트를 순차적으로 시도
+            for exchange_to_try in exchanges_to_try:
+                try:
+                    # TradingView 핸들러 생성
+                    handler = TA_Handler(
+                        symbol=symbol,
+                        screener=screener,
+                        exchange=exchange_to_try,
+                        interval=Interval.INTERVAL_1_DAY
+                    )
+                    
+                    # 분석 실행
+                    analysis = handler.get_analysis()
+                    if analysis and hasattr(analysis, 'summary'):
+                        # 성공한 거래소로 업데이트
+                        exchange = exchange_to_try
+                        logger.debug(f"TradingView {ticker} ({symbol}) 분석 성공: {exchange_to_try}")
+                        break  # 성공 시 즉시 루프 탈출
+                except Exception as analysis_error:
+                    if exchange_to_try == exchanges_to_try[-1]:
+                        # 마지막 시도 실패 시에만 경고 로그
+                        logger.warning(f"TradingView {ticker} ({symbol}) 분석 실행 실패 (모든 거래소 시도 실패): {analysis_error}")
+                    else:
+                        logger.debug(f"TradingView {ticker} ({symbol}) {exchange_to_try} 실패, 다음 거래소 시도 중...")
+                    continue
+            
+            # 모든 거래소 시도 실패 시 None 반환
+            if not analysis:
+                signals.append(f"- {original_ticker}: N/A (분석 실패)")
+                continue
+            
+            if analysis and hasattr(analysis, 'summary') and hasattr(analysis, 'indicators'):
+                # 요약 신호 추출
+                summary = analysis.summary
+                signal = summary.get('RECOMMENDATION', 'NEUTRAL') if isinstance(summary, dict) else 'NEUTRAL'
+                
+                # 핵심 지표 추출
+                indicators = analysis.indicators
+                rsi = indicators.get('RSI', None) if isinstance(indicators, dict) else None
+                macd = indicators.get('MACD', None) if isinstance(indicators, dict) else None
+                sma20 = indicators.get('SMA20', None) if isinstance(indicators, dict) else None
+                
+                # 종목명 가져오기 (간단한 변환)
+                ticker_name = symbol
+                if exchange == "KRX":
+                    # 한국 주식명 매핑
+                    name_map = {
+                        '005930': 'Samsung Electronics',
+                        '000660': 'SK Hynix',
+                    }
+                    ticker_name = name_map.get(symbol, symbol)
+                else:
+                    ticker_name = symbol
+                
+                # 포맷팅
+                indicator_strs = []
+                if rsi is not None:
+                    indicator_strs.append(f"RSI: {rsi:.1f}")
+                if macd is not None:
+                    indicator_strs.append(f"MACD: {macd:.2f}")
+                if sma20 is not None:
+                    indicator_strs.append(f"SMA20: {sma20:.2f}")
+                
+                indicator_str = ", ".join(indicator_strs) if indicator_strs else "N/A"
+                
+                signals.append(f"- {ticker_name}: {signal} ({indicator_str})")
+                logger.info(f"TradingView {original_ticker} ({symbol}) 분석 완료: {signal}")
+            else:
+                logger.warning(f"TradingView {original_ticker} ({symbol}) 분석 실패: 분석 결과가 유효하지 않음")
+                
+        except Exception as e:
+            logger.warning(f"TradingView {ticker} 분석 실패: {e}")
+            continue
+    
+    if signals:
+        result = "[TECHNICAL SIGNALS (Source: TradingView)]\n" + "\n".join(signals)
+        logger.info(f"TradingView 기술적 분석 수집 완료: {len(signals)}개")
+        print(f"✅ TradingView 기술적 분석 수집 완료: {len(signals)}개")
+        return result
+    else:
+        result = "[TECHNICAL SIGNALS (Source: TradingView)]\n데이터 수집 실패"
+        logger.warning("TradingView 기술적 분석: 데이터 없음")
+        print("⚠️ TradingView 기술적 분석: 데이터 없음")
+        return result
 
 

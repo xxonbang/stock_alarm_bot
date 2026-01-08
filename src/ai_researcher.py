@@ -8,7 +8,7 @@ import os
 os.environ["GRPC_DNS_RESOLVER"] = "native"
 os.environ["GRPC_VERBOSITY"] = "ERROR"  # 불필요한 gRPC 로그 끄기
 
-import google.generativeai as genai
+from google import genai
 import time
 import logging
 from typing import Optional, Tuple, Dict
@@ -24,32 +24,20 @@ class AIResearcher:
         Args:
             api_key: Google AI API Key
         """
-        genai.configure(api_key=api_key)
         self.api_key = api_key
         
-        # 현재 지원되는 최신 모델 사용 (gemini-1.5-flash는 Deprecated)
-        # gemini-2.5-flash가 현재 표준 모델
-        model_name = 'models/gemini-2.5-flash'
-        
+        # Google GenAI v2 클라이언트 초기화
         try:
-            self.model = genai.GenerativeModel(model_name)
-            logger.info(f"✅ 모델 선택: {model_name} (현재 지원되는 최신 모델)")
-            print(f"✅ 모델 선택: {model_name} (현재 지원되는 최신 모델)")
+            self.client = genai.Client(api_key=api_key)
+            # 현재 지원되는 최신 모델 사용
+            self.model_name = 'gemini-2.5-flash'
+            logger.info(f"✅ Google GenAI v2 클라이언트 초기화 완료: {self.model_name}")
+            print(f"✅ Google GenAI v2 클라이언트 초기화 완료: {self.model_name}")
         except Exception as e:
-            # Fallback: gemini-2.0-flash 시도
-            error_msg = str(e)
-            logger.warning(f"모델 {model_name} 초기화 실패, fallback 시도: {error_msg[:200]}")
-            print(f"⚠️ 모델 {model_name} 초기화 실패, fallback 시도 중...")
-            try:
-                model_name = 'models/gemini-2.0-flash'
-                self.model = genai.GenerativeModel(model_name)
-                logger.info(f"✅ 모델 선택 (fallback): {model_name}")
-                print(f"✅ 모델 선택 (fallback): {model_name}")
-            except Exception as e2:
-                error_msg = f"모델 초기화 최종 실패: {str(e2)[:200]}"
-                logger.error(error_msg)
-                print(f"❌ {error_msg}")
-                raise RuntimeError(error_msg)
+            error_msg = f"Google GenAI 클라이언트 초기화 실패: {str(e)[:200]}"
+            logger.error(error_msg)
+            print(f"❌ {error_msg}")
+            raise RuntimeError(error_msg)
     
     def _call_ai(self, prompt: str, max_retries: int = 5) -> Tuple[str, Dict]:
         """
@@ -65,8 +53,14 @@ class AIResearcher:
         """
         for attempt in range(max_retries):
             try:
-                # Google Search 도구 비활성화: tools 파라미터를 전달하지 않음
-                response = self.model.generate_content(prompt)
+                # Google GenAI v2 API 호출
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt
+                )
+                
+                # 응답 텍스트 추출 (google-genai v2는 response.text 속성 제공)
+                response_text = response.text if hasattr(response, 'text') else ""
                 
                 # 토큰 사용량 정보 추출
                 usage_info = {}
@@ -77,18 +71,15 @@ class AIResearcher:
                         'completion_tokens': getattr(usage_metadata, 'candidates_token_count', 0),
                         'total_tokens': getattr(usage_metadata, 'total_token_count', 0)
                     }
-                elif hasattr(response, 'candidates') and len(response.candidates) > 0:
-                    # candidates를 통해 토큰 정보 확인
-                    candidate = response.candidates[0]
-                    if hasattr(candidate, 'usage_metadata'):
-                        usage_metadata = candidate.usage_metadata
-                        usage_info = {
-                            'prompt_tokens': getattr(usage_metadata, 'prompt_token_count', 0),
-                            'completion_tokens': getattr(usage_metadata, 'candidates_token_count', 0),
-                            'total_tokens': getattr(usage_metadata, 'total_token_count', 0)
-                        }
+                elif hasattr(response, 'usage'):
+                    usage = response.usage
+                    usage_info = {
+                        'prompt_tokens': getattr(usage, 'prompt_token_count', 0),
+                        'completion_tokens': getattr(usage, 'candidates_token_count', 0),
+                        'total_tokens': getattr(usage, 'total_token_count', 0)
+                    }
                 
-                return response.text, usage_info
+                return response_text, usage_info
             except Exception as e:
                 import traceback
                 error_str = str(e)
@@ -217,14 +208,14 @@ class AIResearcher:
    - 올바른 예: "삼성전자(005930.KS)", "엔비디아(NVDA)", "테슬라(TSLA)"
    - 잘못된 예: "005930.KS가 상승", "NVDA 급등" (종목명 없음)
 5. 뉴스(A)를 인용할 경우, 주가(B)와의 인과관계를 설명하세요.
-  - 예: "마두로 체포 뉴스로 인해 유가가 상승($57)하여 에너지 ETF 강세가 예상됩니다"
-  - 예: "CES 기대감으로 엔비디아가 상승하면서 국내 반도체주(하이닉스) 동반 상승 가능성이 높습니다"
+   - 예: "마두로 체포 뉴스로 인해 유가가 상승($57)하여 에너지 ETF 강세가 예상됩니다"
+   - 예: "CES 기대감으로 엔비디아가 상승하면서 국내 반도체주(하이닉스) 동반 상승 가능성이 높습니다"
 5. 포트폴리오(기술주, 금, 지수 ETF)와 관련 없는 잡다한 뉴스(화장품, 건설, 개별 소비재 등)는 무시하세요.
 6. 주장 논리에 필요할 경우, 기술적 지표(RSI, 이격도)를 활용하여 판단하시오.
-  - RSI 30 이하: 과매도 → 단기 반등 기회
-  - RSI 70 이상: 과매수 → 단기 과열 경계
-  - 이격도 95% 이하: 침체 → 기술적 반등 가능
-  - 이격도 105% 이상: 과열 → 차익 실현 고려
+   - RSI 30 이하: 과매도 → 단기 반등 기회
+   - RSI 70 이상: 과매수 → 단기 과열 경계
+   - 이격도 95% 이하: 침체 → 기술적 반등 가능
+   - 이격도 105% 이상: 과열 → 차익 실현 고려
 
 [작성 포맷 및 가이드라인]
 [가이드라인]

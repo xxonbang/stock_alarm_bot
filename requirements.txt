@@ -4,8 +4,8 @@
 # Python 3.9 호환을 위해 버전 제한
 yfinance>=0.2.18,<1.0.0
 
-# Google AI (Gemini)
-google-generativeai>=0.3.0
+# Google AI (Gemini) - 최신 v2 SDK
+google-genai>=1.0.0
 
 # 텔레그램 봇
 requests>=2.31.0
@@ -20,5 +20,15 @@ python-dotenv>=1.0.0
 # 시간대 처리
 pytz>=2023.3
 
+# FRED API (연준 데이터)
+fredapi>=0.5.1
+
+# TradingView 기술적 분석
+tradingview-ta>=3.3.0
+
+# RSS 피드 파싱
+feedparser>=6.0.10
+
 # 로깅 및 유틸리티는 표준 라이브러리 사용
 
+urllib3>=2.0.0

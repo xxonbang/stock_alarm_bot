@@ -9,12 +9,28 @@
 - 모든 데이터는 원문 그대로 반환 (최종 리포트 단계에서 AI가 처리)
 """
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import logging
 from typing import List, Dict, Optional
 import time
 import yfinance as yf
 from datetime import datetime, timedelta
+import os
+import re
+import warnings
+try:
+    import feedparser
+except ImportError:
+    feedparser = None
+try:
+    from fredapi import Fred
+except ImportError:
+    Fred = None
+
+# SSL 경고 무시 (한경 컨센서스 등에서 verify=False 사용 시)
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
 # AI 금지 검증: 이 파일에서 직접 import하지 않았는지 확인
 # (다른 모듈에서 간접적으로 import되는 것은 허용)
@@ -26,19 +42,39 @@ if 'google.generativeai' in sys.modules:
 
 logger = logging.getLogger(__name__)
 
-# User-Agent 헤더 (봇 차단 방지) - 최신 Chrome 브라우저
+# User-Agent 헤더 (봇 차단 방지) - 검증된 Chrome 브라우저 위장
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9,ko;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Cache-Control': 'max-age=0',
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://www.google.com/"
 }
+
+# requests.Session 및 Retry 설정 (전역 세션 객체)
+def _create_session() -> requests.Session:
+    """
+    재시도 로직이 포함된 Session 객체 생성
+    최대 3회 재시도, 백오프 팩터 1초
+    """
+    session = requests.Session()
+    
+    # Retry 전략 설정
+    retry_strategy = Retry(
+        total=3,  # 최대 3회 재시도
+        backoff_factor=1,  # 1초, 2초, 4초 간격으로 재시도
+        status_forcelist=[429, 500, 502, 503, 504],  # 재시도할 HTTP 상태 코드
+        allowed_methods=["HEAD", "GET", "OPTIONS"]  # 재시도할 HTTP 메서드
+    )
+    
+    # HTTPAdapter에 Retry 전략 적용
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    return session
+
+# 전역 세션 객체 생성
+_session = _create_session()
 
 
 def get_yahoo_finance_news(max_items: int = 10) -> List[Dict]:
@@ -56,7 +92,7 @@ def get_yahoo_finance_news(max_items: int = 10) -> List[Dict]:
         url = "https://finance.yahoo.com/news/"
         logger.info(f"Yahoo Finance 뉴스 수집 중: {url}")
         
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        response = _session.get(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -128,10 +164,17 @@ def get_naver_finance_news(max_items: int = 10) -> List[Dict]:
         url = "https://finance.naver.com/news/news_list.naver?mode=LSS2D&section_id=101&section_id2=258"
         logger.info(f"네이버 금융 뉴스 수집 중: {url}")
         
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        response = _session.get(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
         
-        soup = BeautifulSoup(response.content, 'html.parser')
+        # 네이버 금융은 euc-kr 인코딩을 사용하므로 명시적으로 디코딩
+        try:
+            content = response.content.decode('euc-kr', 'replace')
+        except (UnicodeDecodeError, AttributeError):
+            # 디코딩 실패 시 기본 방식 사용
+            content = response.text
+        
+        soup = BeautifulSoup(content, 'html.parser')
         
         # 네이버 금융 뉴스 구조 파싱
         article_list = soup.select('.articleList li, .articleSubject')
@@ -311,21 +354,124 @@ def get_market_news_with_context(max_items: int = 10) -> str:
     return result
 
 
+def get_fred_macro_data() -> str:
+    """
+    FRED API를 사용하여 연준 데이터 수집 (Macro Intelligence)
+    
+    Returns:
+        포맷팅된 FRED 매크로 데이터 텍스트
+    """
+    logger.info("=== FRED API 매크로 데이터 수집 시작 ===")
+    
+    if Fred is None:
+        logger.warning("fredapi 라이브러리가 없어 FRED 데이터를 수집할 수 없습니다.")
+        return "[MACRO DATA (Source: Federal Reserve FRED)]\nFRED API 라이브러리 미설치"
+    
+    try:
+        # FRED API Key (환경변수 또는 기본값)
+        fred_api_key = os.getenv('FRED_API_KEY', '963732203fa6b98976f41d4b979c18e6')
+        fred = Fred(api_key=fred_api_key)
+        
+        # 수집 대상 시리즈
+        fred_series = {
+            'DGS10': {
+                'name': 'US 10Y Treasury',
+                'description': 'Risk-Free Rate',
+                'format': 'percent'
+            },
+            'T10Y2Y': {
+                'name': 'Yield Curve (10Y-2Y)',
+                'description': 'Recession Signal',
+                'format': 'decimal'
+            },
+            'BAMLH0A0HYM2': {
+                'name': 'High Yield Spread',
+                'description': 'Credit Risk',
+                'format': 'percent'
+            },
+            'T10YIE': {
+                'name': 'Inflation Expectation',
+                'description': 'Breakeven Inflation Rate',
+                'format': 'percent'
+            },
+            'DEXKOUS': {
+                'name': 'USD/KRW',
+                'description': 'South Korea / U.S. Foreign Exchange Rate',
+                'format': 'decimal'
+            }
+        }
+        
+        indicators = []
+        
+        for series_id, config in fred_series.items():
+            try:
+                # 최신 데이터 조회
+                data = fred.get_series(series_id, limit=1)
+                
+                if data is not None and len(data) > 0:
+                    latest_date = data.index[-1]
+                    latest_value = float(data.iloc[-1])
+                    
+                    # 포맷팅
+                    if config['format'] == 'percent':
+                        if series_id == 'DGS10':
+                            value_str = f"{latest_value:.2f}%"
+                        elif series_id == 'BAMLH0A0HYM2':
+                            value_str = f"{latest_value:.2f}%"
+                        elif series_id == 'T10YIE':
+                            value_str = f"{latest_value:.1f}%"
+                        else:
+                            value_str = f"{latest_value:.2f}%"
+                    else:
+                        if series_id == 'DEXKOUS':
+                            value_str = f"{latest_value:.2f}"
+                        else:
+                            value_str = f"{latest_value:.2f}"
+                    
+                    # 경고 메시지 추가
+                    warning = ""
+                    if series_id == 'T10Y2Y' and latest_value < 0:
+                        warning = " (Recession Signal Warning!)"
+                    elif series_id == 'BAMLH0A0HYM2' and latest_value > 4:
+                        warning = " (Credit Risk High)"
+                    
+                    indicators.append(f"- {config['name']}: {value_str} ({config['description']}{warning})")
+                    logger.info(f"FRED {config['name']} 수집 완료: {value_str}")
+                else:
+                    indicators.append(f"- {config['name']}: N/A")
+                    logger.warning(f"FRED {series_id} 데이터 없음")
+            except Exception as e:
+                logger.warning(f"FRED {series_id} 수집 실패: {e}")
+                indicators.append(f"- {config['name']}: N/A")
+        
+        if indicators:
+            result = "[MACRO DATA (Source: Federal Reserve FRED)]\n" + "\n".join(indicators)
+            logger.info(f"FRED 매크로 데이터 수집 완료: {len(indicators)}개")
+            return result
+        else:
+            return "[MACRO DATA (Source: Federal Reserve FRED)]\n데이터 수집 실패"
+            
+    except Exception as e:
+        logger.error(f"FRED API 수집 실패: {e}")
+        return "[MACRO DATA (Source: Federal Reserve FRED)]\n데이터 수집 실패"
+
+
 def get_market_indicators() -> str:
     """
-    매크로 경제 지표 수집 (yfinance + 공포/탐욕 지수)
+    매크로 경제 지표 수집 (FRED API + yfinance + 공포/탐욕 지수)
     
     Returns:
         포맷팅된 매크로 지표 텍스트
     """
     logger.info("=== 매크로 경제 지표 수집 시작 ===")
     
+    # Part A: FRED API 데이터 (우선)
+    fred_data = get_fred_macro_data()
+    
     indicators = []
     
-    # Part A: yfinance로 수집 가능한 지표들
+    # Part B: yfinance로 수집 가능한 지표들 (FRED에 없는 것들)
     macro_tickers = {
-        'KRW=X': 'USD/KRW 환율',
-        '^TNX': 'US 10-Year Treasury',
         'CL=F': 'WTI 원유',
         'GC=F': '금 선물',
         '^VIX': 'VIX 변동성 지수',
@@ -379,18 +525,19 @@ def get_market_indicators() -> str:
             logger.warning(f"{name} ({ticker}) 수집 실패: {e}")
             indicators.append(f"- {name}: N/A")
     
-    # Part B: 공포/탐욕 지수 (Fear & Greed Index)
+    # Part C: 공포/탐욕 지수 (Fear & Greed Index)
     fear_greed = get_fear_greed_index()
     if fear_greed:
-        indicators.append(fear_greed)
+        indicators.append(fear_greed.replace("**", ""))
     
-    # 결과 포맷팅
+    # 결과 포맷팅 (FRED 데이터 + 추가 지표)
     if indicators:
-        result = "**매크로 경제 지표:**\n" + "\n".join(indicators)
-        logger.info(f"매크로 지표 수집 완료: {len(indicators)}개")
+        additional_indicators = "\n".join(indicators)
+        result = f"{fred_data}\n\n{additional_indicators}"
+        logger.info(f"매크로 지표 수집 완료: FRED + {len(indicators)}개 추가")
     else:
-        result = "**매크로 경제 지표:**\n데이터 수집 불가"
-        logger.warning("매크로 지표 수집 실패")
+        result = fred_data
+        logger.info("매크로 지표 수집 완료: FRED 데이터만")
     
     return result
 
@@ -408,7 +555,7 @@ def get_fear_greed_index() -> Optional[str]:
         url = "https://api.alternative.me/fng/"
         logger.info("공포/탐욕 지수 수집 중...")
         
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        response = _session.get(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
         
         data = response.json()
@@ -439,7 +586,7 @@ def get_fear_greed_index() -> Optional[str]:
     # Fallback: CNN Business 크롤링 시도 (세부 지표 포함)
     try:
         url = "https://www.cnn.com/markets/fear-and-greed"
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        response = _session.get(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -533,7 +680,7 @@ def get_economic_calendar(max_retries: int = 3) -> str:
                 print(f"⏳ {wait_time}초 대기 후 재시도...")
                 time.sleep(wait_time)
             
-            response = requests.get(url, headers=HEADERS, timeout=15)
+            response = _session.get(url, headers=HEADERS, timeout=15)
             
             # Status Code 로그
             status_code = response.status_code
@@ -671,13 +818,13 @@ def get_economic_calendar(max_retries: int = 3) -> str:
                             elif country != 'US' and importance < 3:
                                 continue  # 다른 국가는 중요도 3만 허용
                             
-                            events.append({
-                                'name': event_name,
-                                'time': event_time,
-                                'country': country,
-                                'importance': importance,
-                                'date': event_date_str
-                            })
+                                events.append({
+                                    'name': event_name,
+                                    'time': event_time,
+                                    'country': country,
+                                    'importance': importance,
+                                    'date': event_date_str
+                                })
                             
                             logger.debug(f"추출된 이벤트: {event_name} ({country}), 중요도: {importance}, 날짜: {event_date_str}, 시간: {event_time}")
                             
@@ -810,9 +957,8 @@ def get_us_top_movers(max_items: int = 10) -> str:
                             float(td_text.replace('$', '').replace(',', ''))
                             price_text = td_text
                             break
-                        except:
+                        except ValueError:
                             continue
-                
                 # 필터링: 나스닥 100 또는 S&P 500 구성 종목만 (잡주 제외)
                 # 시가총액이 큰 종목만 필터링하기 위해 가격이 $5 이상인 종목만
                 if ticker and name and change_pct_text:
@@ -935,13 +1081,20 @@ def get_korea_hot_themes(max_themes: int = 3) -> str:
         url = "https://finance.naver.com/sise/theme.naver"
         logger.info(f"네이버 금융 테마 페이지 수집 중: {url}")
         
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        # Session 사용
+        response = _session.get(url, headers=HEADERS, timeout=15)
         response.raise_for_status()
         
-        soup = BeautifulSoup(response.content, 'html.parser')
+        # 네이버 금융은 euc-kr 인코딩을 사용하므로 명시적으로 디코딩
+        try:
+            content = response.content.decode('euc-kr', 'replace')
+        except (UnicodeDecodeError, AttributeError):
+            # 디코딩 실패 시 기본 방식 사용
+            content = response.text
+        
+        soup = BeautifulSoup(content, 'html.parser')
         
         # 테마 리스트 추출 (여러 가능한 선택자 시도)
-        import re
         
         themes = []
         
@@ -1015,10 +1168,10 @@ def get_korea_hot_themes(max_themes: int = 3) -> str:
                 except Exception as e:
                     logger.debug(f"테마 행 파싱 실패: {e}")
                     continue
-            
+                            
             if len(themes) >= max_themes * 2:  # 충분한 데이터 수집
                 break
-        
+                    
         # 등락률 기준으로 정렬 (내림차순)
         themes.sort(key=lambda x: x['change'], reverse=True)
         themes = themes[:max_themes]
@@ -1033,10 +1186,17 @@ def get_korea_hot_themes(max_themes: int = 3) -> str:
                 theme_url = f"https://finance.naver.com/sise/sise_group_detail.naver?type=theme&no={theme['code']}"
                 logger.info(f"테마 상세 페이지 수집 중: {theme['name']} ({theme_url})")
                 
-                theme_response = requests.get(theme_url, headers=HEADERS, timeout=10)
+                theme_response = _session.get(theme_url, headers=HEADERS, timeout=10)
                 theme_response.raise_for_status()
                 
-                theme_soup = BeautifulSoup(theme_response.content, 'html.parser')
+                # 네이버 금융은 euc-kr 인코딩을 사용하므로 명시적으로 디코딩
+                try:
+                    theme_content = theme_response.content.decode('euc-kr', 'replace')
+                except (UnicodeDecodeError, AttributeError):
+                    # 디코딩 실패 시 기본 방식 사용
+                    theme_content = theme_response.text
+                
+                theme_soup = BeautifulSoup(theme_content, 'html.parser')
                 
                 # 주도주 추출 (상승률 상위 2개)
                 import re
@@ -1086,7 +1246,7 @@ def get_korea_hot_themes(max_themes: int = 3) -> str:
                     except Exception as e:
                         logger.debug(f"주도주 파싱 실패: {e}")
                         continue
-                
+            
                 if top_stocks:
                     themes_data.append({
                         'name': theme['name'],
@@ -1284,6 +1444,180 @@ def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
     logger.warning("전문가 시장 전망 수집 실패 (모든 시도 실패)")
     print("❌ 전문가 시장 전망 수집 실패 (모든 시도 실패)")
     return "**📊 전문가 시장 전망:**\n데이터 수집 실패"
+
+
+def get_hankyung_consensus() -> str:
+    """
+    한경 컨센서스 산업 리포트 수집 (국내 시장 재료)
+    
+    Returns:
+        포맷팅된 한경 컨센서스 리포트 텍스트
+    """
+    logger.info("=== 한경 컨센서스 수집 시작 ===")
+    print("=== 한경 컨센서스 수집 시작 ===")
+    
+    url = "http://hkconsensus.hankyung.com/apps.analysis/analysis.list?skinType=industry"
+    
+    try:
+        logger.info(f"한경 컨센서스 페이지 수집 중: {url}")
+        
+        # Session 사용 및 SSL 검증 무시 (DNS 에러 방어)
+        response = _session.get(url, headers=HEADERS, timeout=15, verify=False)
+        response.raise_for_status()
+        
+        # 인코딩 처리: euc-kr 명시적 디코딩으로 한글 깨짐 방지
+        try:
+            content = response.content.decode('euc-kr', 'replace')
+        except (UnicodeDecodeError, AttributeError):
+            # 디코딩 실패 시 기본 방식 사용
+            content = response.text
+        
+        soup = BeautifulSoup(content, 'html.parser')
+        
+        # 리포트 리스트 추출
+        reports = []
+        
+        # 여러 가능한 선택자 시도
+        selectors = [
+            'table tbody tr',
+            '.list_table tbody tr',
+            'tr[onclick]',
+            'tr'
+        ]
+        
+        for selector in selectors:
+            rows = soup.select(selector)
+            if not rows:
+                continue
+            
+            for row in rows[:15]:  # 상위 15개 확인
+                try:
+                    # 제목 추출
+                    title_elem = row.select_one('td a, a[href*="analysis"]')
+                    if not title_elem:
+                        continue
+                    
+                    title = title_elem.get_text(strip=True)
+                    if not title or len(title) < 5:
+                        continue
+                    
+                    # 작성자/증권사 추출
+                    writer = ""
+                    writer_elem = row.select_one('td:last-child, .writer, .author')
+                    if writer_elem:
+                        writer = writer_elem.get_text(strip=True)
+                    
+                    # 중복 제거
+                    if not any(r['title'] == title for r in reports):
+                        reports.append({
+                            'title': title,
+                            'writer': writer
+                        })
+                        
+                        if len(reports) >= 7:  # 최대 7개
+                            break
+                except Exception as e:
+                    logger.debug(f"한경 리포트 행 파싱 실패: {e}")
+                    continue
+            
+            if len(reports) >= 7:
+                break
+        
+        if reports:
+            result = "[MARKET MATERIALS]\n[🇰🇷 Domestic (Source: HK Consensus)]\n"
+            for i, report in enumerate(reports, 1):
+                writer_str = f" ({report['writer']})" if report['writer'] else ""
+                result += f"- {report['title']}{writer_str}\n"
+            
+            logger.info(f"한경 컨센서스 수집 완료: {len(reports)}개")
+            print(f"✅ 한경 컨센서스 수집 완료: {len(reports)}개")
+            return result
+        else:
+            result = "[MARKET MATERIALS]\n[🇰🇷 Domestic (Source: HK Consensus)]\n데이터 수집 실패"
+            logger.warning("한경 컨센서스: 데이터 없음")
+            print("⚠️ 한경 컨센서스: 데이터 없음")
+            return result
+            
+    except Exception as e:
+        logger.error(f"한경 컨센서스 수집 실패: {e}")
+        print(f"❌ 한경 컨센서스 수집 실패: {e}")
+        return "[MARKET MATERIALS]\n[🇰🇷 Domestic (Source: HK Consensus)]\n데이터 수집 실패"
+
+
+def get_google_news_rss() -> str:
+    """
+    Google News RSS 피드 파싱 (해외 시장 재료)
+    우회 파싱 전략: session.get으로 XML 문자열을 가져온 후 feedparser.parse에 전달
+    
+    Returns:
+        포맷팅된 Google News 텍스트
+    """
+    logger.info("=== Google News RSS 수집 시작 ===")
+    print("=== Google News RSS 수집 시작 ===")
+    
+    if feedparser is None:
+        logger.warning("feedparser 라이브러리가 없어 Google News RSS를 수집할 수 없습니다.")
+        return "[🌎 Global (Source: Google News US)]\nfeedparser 라이브러리 미설치"
+    
+    try:
+        url = "https://news.google.com/rss/topics/CAAqJggBCiJCAqJggBCiJCAqJggBCiJCAqJggBCiJCAqJggBCiJCAqJggBCiJCAqJggB?hl=en-US&gl=US&ceid=US:en"
+        logger.info(f"Google News RSS 수집 중: {url}")
+        
+        # 우회 파싱 전략: session.get으로 XML 문자열을 먼저 가져옴
+        response = _session.get(url, headers=HEADERS, timeout=15)
+        
+        # 상태 코드 확인 및 로깅
+        if response.status_code != 200:
+            logger.warning(f"Google News RSS 수집 실패: HTTP {response.status_code} - {response.reason}")
+            return f"[🌎 Global (Source: Google News US)]\n데이터 수집 실패 (HTTP {response.status_code})"
+        
+        response.raise_for_status()
+        
+        # XML 문자열을 직접 파싱 (우회 전략)
+        xml_string = response.text
+        feed = feedparser.parse(xml_string)
+        
+        if not feed.entries:
+            logger.warning("Google News RSS: 피드 항목 없음")
+            return "[🌎 Global (Source: Google News US)]\n데이터 수집 실패"
+        
+        articles = []
+        for entry in feed.entries[:7]:  # 상위 7개
+            try:
+                title = entry.get('title', '').strip()
+                if title and len(title) > 10:
+                    articles.append(title)
+            except Exception as e:
+                logger.debug(f"Google News 항목 파싱 실패: {e}")
+                continue
+        
+        if articles:
+            result = "[🌎 Global (Source: Google News US)]\n"
+            for article in articles:
+                result += f"- {article}\n"
+            
+            logger.info(f"Google News RSS 수집 완료: {len(articles)}개")
+            print(f"✅ Google News RSS 수집 완료: {len(articles)}개")
+            return result
+        else:
+            result = "[🌎 Global (Source: Google News US)]\n데이터 수집 실패"
+            logger.warning("Google News RSS: 데이터 없음")
+            print("⚠️ Google News RSS: 데이터 없음")
+            return result
+            
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if hasattr(e, 'response') and e.response else "Unknown"
+        logger.error(f"Google News RSS 수집 실패: HTTP {status_code} - {e}")
+        print(f"❌ Google News RSS 수집 실패: HTTP {status_code} - {e}")
+        return f"[🌎 Global (Source: Google News US)]\n데이터 수집 실패 (HTTP {status_code})"
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Google News RSS 수집 실패 (네트워크 오류): {e}")
+        print(f"❌ Google News RSS 수집 실패 (네트워크 오류): {e}")
+        return "[🌎 Global (Source: Google News US)]\n데이터 수집 실패 (네트워크 오류)"
+    except Exception as e:
+        logger.error(f"Google News RSS 수집 실패: {e}")
+        print(f"❌ Google News RSS 수집 실패: {e}")
+        return "[🌎 Global (Source: Google News US)]\n데이터 수집 실패"
 
 
 def get_market_headlines(max_items: int = 10) -> str:
