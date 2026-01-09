@@ -8,9 +8,15 @@
 - AI를 사용한 번역/요약 금지
 - 모든 데이터는 원문 그대로 반환 (최종 리포트 단계에서 AI가 처리)
 """
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+# curl_cffi를 사용하여 TLS Fingerprint 차단 우회
+try:
+    from curl_cffi import requests
+    CURL_CFFI_AVAILABLE = True
+except ImportError:
+    # curl_cffi가 없으면 일반 requests 사용 (fallback)
+    import requests
+    CURL_CFFI_AVAILABLE = False
+
 from bs4 import BeautifulSoup
 import logging
 from typing import List, Dict, Optional
@@ -50,28 +56,31 @@ HEADERS = {
     "Referer": "https://www.google.com/"
 }
 
-# requests.Session 및 Retry 설정 (전역 세션 객체)
-def _create_session() -> requests.Session:
+logger = logging.getLogger(__name__)
+
+# curl_cffi Session 생성 (브라우저 의태로 TLS 차단 우회)
+def _create_session():
     """
-    재시도 로직이 포함된 Session 객체 생성
-    최대 3회 재시도, 백오프 팩터 1초
+    curl_cffi를 사용한 Session 객체 생성
+    impersonate="chrome120" 옵션으로 Chrome 브라우저의 TLS 지문을 완벽하게 복제
     """
-    session = requests.Session()
-    
-    # Retry 전략 설정
-    retry_strategy = Retry(
-        total=3,  # 최대 3회 재시도
-        backoff_factor=1,  # 1초, 2초, 4초 간격으로 재시도
-        status_forcelist=[429, 500, 502, 503, 504],  # 재시도할 HTTP 상태 코드
-        allowed_methods=["HEAD", "GET", "OPTIONS"]  # 재시도할 HTTP 메서드
-    )
-    
-    # HTTPAdapter에 Retry 전략 적용
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    
-    return session
+    if CURL_CFFI_AVAILABLE:
+        try:
+            # curl_cffi의 Session은 impersonate 파라미터를 지원
+            session = requests.Session(impersonate="chrome120")
+            logger.info("✅ curl_cffi Session 생성 완료 (TLS Fingerprint 우회 활성화)")
+            return session
+        except Exception as e:
+            # curl_cffi Session 생성 실패 시 일반 requests 사용
+            import requests as std_requests
+            session = std_requests.Session()
+            logger.warning(f"⚠️ curl_cffi Session 생성 실패: {e}, 일반 requests 사용")
+            return session
+    else:
+        # curl_cffi가 없으면 일반 requests 사용
+        session = requests.Session()
+        logger.warning("⚠️ curl_cffi가 설치되지 않아 일반 requests를 사용합니다. TLS 차단 우회 기능이 없습니다.")
+        return session
 
 # 전역 세션 객체 생성
 _session = _create_session()
@@ -1011,8 +1020,8 @@ def get_us_top_movers(max_items: int = 10) -> str:
                     info = stock.info
                     
                     if not info:
-                        continue
-                    
+                                        continue
+                                    
                     # 등락률 확인
                     change_pct = info.get('regularMarketChangePercent', 0)
                     if change_pct and change_pct > 2.0:  # 2% 이상 급등주만
@@ -1034,7 +1043,7 @@ def get_us_top_movers(max_items: int = 10) -> str:
                 except Exception as e:
                     logger.debug(f"{ticker} 정보 조회 실패: {e}")
                     continue
-        
+                            
         # 등락률 기준으로 정렬 (내림차순)
         top_movers.sort(key=lambda x: float(x['change'].replace('+', '').replace('%', '')), reverse=True)
         top_movers = top_movers[:max_items]
@@ -1062,8 +1071,8 @@ def get_us_top_movers(max_items: int = 10) -> str:
 
 def get_korea_hot_themes(max_themes: int = 3) -> str:
     """
-    네이버 금융 테마 페이지에서 오늘의 강세 테마 수집
-    등락률 상위 테마와 각 테마의 주도주 정보 추출
+    네이버 모바일 API를 통해 오늘의 강세 테마 수집
+    HTML 파싱 대신 JSON API를 직접 호출하여 안정적으로 데이터 수집
     
     Args:
         max_themes: 최대 수집할 테마 개수
@@ -1074,104 +1083,132 @@ def get_korea_hot_themes(max_themes: int = 3) -> str:
     logger.info("=== 한국 시장 Hot Themes 수집 시작 ===")
     print("=== 한국 시장 Hot Themes 수집 시작 ===")
     
-    themes_data = []
-    
     try:
-        # Step 1: 네이버 금융 테마 페이지에서 등락률 상위 테마 추출
-        url = "https://finance.naver.com/sise/theme.naver"
-        logger.info(f"네이버 금융 테마 페이지 수집 중: {url}")
-        
-        # Session 사용
-        response = _session.get(url, headers=HEADERS, timeout=15)
-        response.raise_for_status()
-        
-        # 네이버 금융은 euc-kr 인코딩을 사용하므로 명시적으로 디코딩
-        try:
-            content = response.content.decode('euc-kr', 'replace')
-        except (UnicodeDecodeError, AttributeError):
-            # 디코딩 실패 시 기본 방식 사용
-            content = response.text
-        
-        soup = BeautifulSoup(content, 'html.parser')
-        
-        # 테마 리스트 추출 (여러 가능한 선택자 시도)
-        
+        # 방법 1: 네이버 모바일 증권 API 시도 (우선 시도)
+        mobile_api_success = False
         themes = []
         
-        # 방법 1: 테이블에서 추출
-        theme_selectors = [
-            'table.type_1 tbody tr',
-            '.box_type_l tbody tr',
-            'table tbody tr',
-            'tr'
-        ]
+        try:
+            url = "https://m.stock.naver.com/api/json/theme/merged/list"
+            params = {"page": 1, "pageSize": 5}
+            logger.info(f"네이버 모바일 API 호출 시도: {url}")
+            
+            mobile_headers = {
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+                "Referer": "https://m.stock.naver.com/domestic/theme",  # 핵심: 이 헤더가 없으면 404/403 발생
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "ko-KR,ko;q=0.9",
+                "Origin": "https://m.stock.naver.com"
+            }
+            
+            response = _session.get(url, headers=mobile_headers, params=params, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'result' in data and 'list' in data['result']:
+                    theme_list = data['result']['list']
+                    
+                    for item in theme_list[:max_themes * 2]:
+                        try:
+                            theme_name = item.get('name', '').strip()
+                            change_rate = item.get('changeRate', 0)
+                            leading_stock = item.get('leadingStock', {})
+                            
+                            if not theme_name or len(theme_name) < 2:
+                                continue
+                            
+                            if change_rate and isinstance(change_rate, (int, float)) and change_rate >= 0.1:
+                                stocks = []
+                                if leading_stock and isinstance(leading_stock, dict):
+                                    stock_name = leading_stock.get('name', '')
+                                    stock_change = leading_stock.get('changeRate', 0)
+                                    if stock_name:
+                                        stocks.append({
+                                            'name': stock_name,
+                                            'change': stock_change if isinstance(stock_change, (int, float)) else 0
+                                        })
+                                
+                                themes.append({
+                                    'name': theme_name,
+                                    'change': float(change_rate),
+                                    'stocks': stocks
+                                })
+                                
+                                if len(themes) >= max_themes:
+                                    break
+                        except Exception as e:
+                            logger.debug(f"테마 항목 파싱 실패: {e}")
+                            continue
+                            
+                    if themes:
+                        mobile_api_success = True
+                        logger.info("네이버 모바일 API 성공")
+        except Exception as e:
+            logger.debug(f"모바일 API 호출 실패: {e}, PC 페이지로 Fallback")
         
-        for selector in theme_selectors:
-            rows = soup.select(selector)
-            if not rows:
-                continue
-                
-            for row in rows[:30]:  # 상위 30개 확인
+        # 방법 2: 모바일 API 실패 시 PC 페이지 HTML 파싱 (Fallback)
+        if not mobile_api_success:
+            logger.info("PC 페이지 HTML 파싱으로 Fallback")
+            url = "https://finance.naver.com/sise/theme.naver"
+            response = _session.get(url, headers=HEADERS, timeout=15)
+            response.raise_for_status()
+            
+            try:
+                content = response.content.decode('euc-kr', 'replace')
+            except (UnicodeDecodeError, AttributeError):
+                content = response.text
+            
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # 테마 리스트 추출: Index-Based Parsing
+            rows = soup.find_all('tr')
+            
+            for row in rows[:100]:
                 try:
-                    # 테마명과 링크 추출
-                    theme_link = row.select_one('a[href*="theme"], a[href*="sise_group"]')
+                    tds = row.find_all('td')
+                    if len(tds) < 3:
+                        continue
+                    
+                    first_td = tds[0]
+                    theme_link = first_td.find('a')
                     if not theme_link:
                         continue
                     
                     theme_name = theme_link.get_text(strip=True)
-                    theme_href = theme_link.get('href', '')
-                    
                     if not theme_name or len(theme_name) < 2:
                         continue
                     
-                    # 테마 코드 추출 (URL에서)
-                    theme_code = None
-                    if 'no=' in theme_href:
-                        theme_code = theme_href.split('no=')[1].split('&')[0].split('#')[0]
-                    elif '/theme/' in theme_href:
-                        # URL 패턴: /sise/sise_group_detail.naver?type=theme&no=123
-                        match = re.search(r'no=(\d+)', theme_href)
-                        if match:
-                            theme_code = match.group(1)
-                    
-                    if not theme_code:
-                        continue
-                    
-                    # 등락률 추출 (모든 td에서 찾기)
+                    # 등락률 추출
                     change_pct = None
-                    tds = row.select('td')
-                    for td in tds:
+                    for td in tds[1:]:
                         td_text = td.get_text(strip=True)
-                        # 등락률 패턴: "+5.2%", "5.2%", "+5.2" 등
-                        match = re.search(r'([+-]?)(\d+\.?\d*)%?', td_text)
-                        if match:
-                            sign = match.group(1)
-                            num_str = match.group(2)
-                            try:
-                                num = float(num_str)
-                                # 양수이고 0.1 이상인 경우만 (실제 등락률)
-                                if num >= 0.1 and (sign == '+' or (sign == '' and num > 0)):
-                                    change_pct = num
-                                    break
-                            except:
-                                pass
+                        if '%' in td_text:
+                            match = re.search(r'([+-]?)(\d+\.?\d*)%?', td_text)
+                            if match:
+                                sign = match.group(1)
+                                num_str = match.group(2)
+                                try:
+                                    num = float(num_str)
+                                    if num >= 0.1 and (sign == '+' or (sign == '' and num > 0)):
+                                        change_pct = num
+                                        break
+                                except:
+                                    pass
                     
-                    if theme_name and theme_code and change_pct is not None and change_pct > 0:
-                        # 중복 제거
-                        if not any(t['code'] == theme_code for t in themes):
+                    if theme_name and change_pct is not None and change_pct > 0:
+                        if not any(t['name'] == theme_name for t in themes):
                             themes.append({
                                 'name': theme_name,
-                                'code': theme_code,
                                 'change': change_pct,
-                                'href': theme_href
+                                'stocks': []
                             })
+                            
+                            if len(themes) >= max_themes:
+                                break
                 except Exception as e:
                     logger.debug(f"테마 행 파싱 실패: {e}")
                     continue
-                            
-            if len(themes) >= max_themes * 2:  # 충분한 데이터 수집
-                break
-                    
+        
         # 등락률 기준으로 정렬 (내림차순)
         themes.sort(key=lambda x: x['change'], reverse=True)
         themes = themes[:max_themes]
@@ -1180,123 +1217,35 @@ def get_korea_hot_themes(max_themes: int = 3) -> str:
             logger.warning("Hot Themes: 테마 데이터 없음")
             return "**🔥 오늘의 강세 테마 (한국):**\n테마 데이터 수집 실패"
         
-        # Step 2: 각 테마 페이지에서 주도주 추출
-        for theme in themes:
-            try:
-                theme_url = f"https://finance.naver.com/sise/sise_group_detail.naver?type=theme&no={theme['code']}"
-                logger.info(f"테마 상세 페이지 수집 중: {theme['name']} ({theme_url})")
-                
-                theme_response = _session.get(theme_url, headers=HEADERS, timeout=10)
-                theme_response.raise_for_status()
-                
-                # 네이버 금융은 euc-kr 인코딩을 사용하므로 명시적으로 디코딩
-                try:
-                    theme_content = theme_response.content.decode('euc-kr', 'replace')
-                except (UnicodeDecodeError, AttributeError):
-                    # 디코딩 실패 시 기본 방식 사용
-                    theme_content = theme_response.text
-                
-                theme_soup = BeautifulSoup(theme_content, 'html.parser')
-                
-                # 주도주 추출 (상승률 상위 2개)
-                import re
-                stock_rows = theme_soup.select('table.type_1 tbody tr, .box_type_l tbody tr, table tbody tr')
-                top_stocks = []
-                
-                for row in stock_rows[:15]:  # 상위 15개 확인
-                    try:
-                        # 종목명 추출
-                        stock_link = row.select_one('td a[href*="item"], a[href*="item"]')
-                        if not stock_link:
-                            continue
-                        
-                        stock_name = stock_link.get_text(strip=True)
-                        if not stock_name or len(stock_name) < 2:
-                            continue
-                        
-                        # 등락률 추출 (모든 td에서 찾기)
-                        change_pct = None
-                        tds = row.select('td')
-                        for td in tds:
-                            td_text = td.get_text(strip=True)
-                            # 등락률 패턴 찾기
-                            match = re.search(r'([+-]?)(\d+\.?\d*)%?', td_text)
-                            if match:
-                                sign = match.group(1)
-                                num_str = match.group(2)
-                                try:
-                                    num = float(num_str)
-                                    # 양수이고 0.1 이상인 경우만
-                                    if num >= 0.1 and (sign == '+' or (sign == '' and num > 0)):
-                                        change_pct = num
-                                        break
-                                except:
-                                    pass
-                        
-                        if stock_name and change_pct is not None and change_pct > 0:
-                            # 중복 제거
-                            if not any(s['name'] == stock_name for s in top_stocks):
-                                top_stocks.append({
-                                    'name': stock_name,
-                                    'change': change_pct
-                                })
-                                
-                                if len(top_stocks) >= 2:  # 상위 2개만
-                                    break
-                    except Exception as e:
-                        logger.debug(f"주도주 파싱 실패: {e}")
-                        continue
-            
-                if top_stocks:
-                    themes_data.append({
-                        'name': theme['name'],
-                        'change': theme['change'],
-                        'stocks': top_stocks
-                    })
-                
-                # 요청 간 딜레이 (서버 부하 방지)
-                time.sleep(1)
-                
-            except Exception as e:
-                logger.warning(f"테마 '{theme['name']}' 상세 페이지 수집 실패: {e}")
-                # 실패해도 테마명과 평균 등락률은 포함
-                themes_data.append({
-                    'name': theme['name'],
-                    'change': theme['change'],
-                    'stocks': []
-                })
-                continue
-        
         # 결과 포맷팅
-        if themes_data:
-            result = "**🔥 오늘의 강세 테마 (한국):**\n\n"
-            for i, theme in enumerate(themes_data, 1):
-                result += f"{i}. <b>{theme['name']}</b> (+{theme['change']:.2f}% Avg)\n"
-                
-                if theme['stocks']:
-                    result += "   - 주도주: "
-                    stock_strs = []
-                    for stock in theme['stocks']:
-                        stock_strs.append(f"{stock['name']} (+{stock['change']:.2f}%)")
-                    result += ", ".join(stock_strs) + "\n"
-                else:
-                    result += "   - 주도주: 데이터 수집 실패\n"
-                
-                result += "\n"
+        result_lines = ["**🔥 오늘의 강세 테마 (한국):**"]
+        
+        for i, theme in enumerate(themes, 1):
+            theme_line = f"{i}. {theme['name']} (+{theme['change']:.2f}%)"
             
-            logger.info(f"한국 Hot Themes 수집 완료: {len(themes_data)}개 테마")
-            print(f"✅ 한국 Hot Themes 수집 완료: {len(themes_data)}개 테마")
-            return result
-        else:
-            result = "**🔥 오늘의 강세 테마 (한국):**\n테마 데이터 수집 실패"
-            logger.warning("한국 Hot Themes: 데이터 없음")
-            print("⚠️ 한국 Hot Themes: 데이터 없음")
-            return result
+            # 주도주 정보 추가
+            if theme.get('stocks'):
+                stock_info = []
+                for stock in theme['stocks'][:2]:  # 상위 2개만
+                    stock_name = stock.get('name', '')
+                    stock_change = stock.get('change', 0)
+                    if stock_name:
+                        stock_info.append(f"{stock_name} (+{stock_change:.2f}%)")
+                
+                if stock_info:
+                    theme_line += f"\n   주도주: {', '.join(stock_info)}"
             
+            result_lines.append(theme_line)
+        
+        result = "\n".join(result_lines)
+        logger.info(f"Hot Themes 수집 완료: {len(themes)}개")
+        print(f"✅ Hot Themes 수집 완료: {len(themes)}개")
+        return result
+                        
     except Exception as e:
-        logger.error(f"한국 Hot Themes 수집 실패: {e}")
-        print(f"❌ 한국 Hot Themes 수집 실패: {e}")
-        return "**🔥 오늘의 강세 테마 (한국):**\n데이터 수집 실패"
+        logger.error(f"Hot Themes 수집 실패: {e}")
+        print(f"❌ Hot Themes 수집 실패: {e}")
+        return "**🔥 오늘의 강세 테마 (한국):**\n테마 데이터 수집 실패"
 
 
 def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
@@ -1347,8 +1296,8 @@ def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
                     
                     if not news_list:
                         logger.debug(f"{ticker}: 뉴스 없음")
-                        continue
-                    
+                    continue
+            
                     logger.info(f"{ticker}: {len(news_list)}개 뉴스 발견")
                     
                     # 뉴스 필터링 (키워드 기반)
@@ -1448,24 +1397,26 @@ def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
 
 def get_hankyung_consensus() -> str:
     """
-    한경 컨센서스 산업 리포트 수집 (국내 시장 재료)
+    네이버 금융 리서치 수집 (국내 시장 재료)
+    한경 컨센서스 대신 네이버 금융의 시황정보/리포트를 수집 (안정성 확보)
     
     Returns:
-        포맷팅된 한경 컨센서스 리포트 텍스트
+        포맷팅된 국내 시장 재료 텍스트
     """
-    logger.info("=== 한경 컨센서스 수집 시작 ===")
-    print("=== 한경 컨센서스 수집 시작 ===")
+    logger.info("=== 네이버 금융 리서치 수집 시작 ===")
+    print("=== 네이버 금융 리서치 수집 시작 ===")
     
-    url = "http://hkconsensus.hankyung.com/apps.analysis/analysis.list?skinType=industry"
+    # 네이버 금융 시황정보 페이지
+    url = "https://finance.naver.com/research/market_info_list.naver"
     
     try:
-        logger.info(f"한경 컨센서스 페이지 수집 중: {url}")
+        logger.info(f"네이버 금융 리서치 페이지 수집 중: {url}")
         
-        # Session 사용 및 SSL 검증 무시 (DNS 에러 방어)
-        response = _session.get(url, headers=HEADERS, timeout=15, verify=False)
+        # curl_cffi Session 사용 (TLS Fingerprint 우회)
+        response = _session.get(url, headers=HEADERS, timeout=15)
         response.raise_for_status()
         
-        # 인코딩 처리: euc-kr 명시적 디코딩으로 한글 깨짐 방지
+        # 네이버 금융은 euc-kr 인코딩을 사용하므로 명시적으로 디코딩
         try:
             content = response.content.decode('euc-kr', 'replace')
         except (UnicodeDecodeError, AttributeError):
@@ -1477,11 +1428,11 @@ def get_hankyung_consensus() -> str:
         # 리포트 리스트 추출
         reports = []
         
-        # 여러 가능한 선택자 시도
+        # 여러 가능한 선택자 시도 (범용적으로)
         selectors = [
+            'table.type_1 tbody tr',
             'table tbody tr',
-            '.list_table tbody tr',
-            'tr[onclick]',
+            '.box_type_l tbody tr',
             'tr'
         ]
         
@@ -1490,10 +1441,10 @@ def get_hankyung_consensus() -> str:
             if not rows:
                 continue
             
-            for row in rows[:15]:  # 상위 15개 확인
+            for row in rows[:20]:  # 상위 20개 확인
                 try:
-                    # 제목 추출
-                    title_elem = row.select_one('td a, a[href*="analysis"]')
+                    # 제목 추출 (다양한 패턴 시도)
+                    title_elem = row.select_one('td a, a[href*="research"], a[href*="market_info"]')
                     if not title_elem:
                         continue
                     
@@ -1501,9 +1452,9 @@ def get_hankyung_consensus() -> str:
                     if not title or len(title) < 5:
                         continue
                     
-                    # 작성자/증권사 추출
+                    # 작성자/증권사 추출 (선택적)
                     writer = ""
-                    writer_elem = row.select_one('td:last-child, .writer, .author')
+                    writer_elem = row.select_one('td:last-child, .writer, .author, td:nth-child(2)')
                     if writer_elem:
                         writer = writer_elem.get_text(strip=True)
                     
@@ -1517,103 +1468,101 @@ def get_hankyung_consensus() -> str:
                         if len(reports) >= 7:  # 최대 7개
                             break
                 except Exception as e:
-                    logger.debug(f"한경 리포트 행 파싱 실패: {e}")
+                    logger.debug(f"네이버 리포트 행 파싱 실패: {e}")
                     continue
             
             if len(reports) >= 7:
                 break
         
         if reports:
-            result = "[MARKET MATERIALS]\n[🇰🇷 Domestic (Source: HK Consensus)]\n"
+            result = "[MARKET MATERIALS]\n[🇰🇷 Domestic (Source: Naver Finance Research)]\n"
             for i, report in enumerate(reports, 1):
                 writer_str = f" ({report['writer']})" if report['writer'] else ""
                 result += f"- {report['title']}{writer_str}\n"
             
-            logger.info(f"한경 컨센서스 수집 완료: {len(reports)}개")
-            print(f"✅ 한경 컨센서스 수집 완료: {len(reports)}개")
+            logger.info(f"네이버 금융 리서치 수집 완료: {len(reports)}개")
+            print(f"✅ 네이버 금융 리서치 수집 완료: {len(reports)}개")
             return result
         else:
-            result = "[MARKET MATERIALS]\n[🇰🇷 Domestic (Source: HK Consensus)]\n데이터 수집 실패"
-            logger.warning("한경 컨센서스: 데이터 없음")
-            print("⚠️ 한경 컨센서스: 데이터 없음")
+            result = "[MARKET MATERIALS]\n[🇰🇷 Domestic (Source: Naver Finance Research)]\n데이터 수집 실패"
+            logger.warning("네이버 금융 리서치: 데이터 없음")
+            print("⚠️ 네이버 금융 리서치: 데이터 없음")
             return result
             
     except Exception as e:
-        logger.error(f"한경 컨센서스 수집 실패: {e}")
-        print(f"❌ 한경 컨센서스 수집 실패: {e}")
-        return "[MARKET MATERIALS]\n[🇰🇷 Domestic (Source: HK Consensus)]\n데이터 수집 실패"
+        logger.error(f"네이버 금융 리서치 수집 실패: {e}")
+        print(f"❌ 네이버 금융 리서치 수집 실패: {e}")
+        return "[MARKET MATERIALS]\n[🇰🇷 Domestic (Source: Naver Finance Research)]\n데이터 수집 실패"
 
 
 def get_google_news_rss() -> str:
     """
-    Google News RSS 피드 파싱 (해외 시장 재료)
-    우회 파싱 전략: session.get으로 XML 문자열을 가져온 후 feedparser.parse에 전달
+    Yahoo Finance News 수집 (해외 시장 재료)
+    Google News RSS 대신 Yahoo Finance의 Stock Market News를 수집 (안정성 확보)
     
     Returns:
-        포맷팅된 Google News 텍스트
+        포맷팅된 해외 시장 재료 텍스트
     """
-    logger.info("=== Google News RSS 수집 시작 ===")
-    print("=== Google News RSS 수집 시작 ===")
+    logger.info("=== Yahoo Finance News 수집 시작 ===")
+    print("=== Yahoo Finance News 수집 시작 ===")
     
-    if feedparser is None:
-        logger.warning("feedparser 라이브러리가 없어 Google News RSS를 수집할 수 없습니다.")
-        return "[🌎 Global (Source: Google News US)]\nfeedparser 라이브러리 미설치"
+    # Yahoo Finance Stock Market News 페이지
+    url = "https://finance.yahoo.com/topic/stock-market-news/"
     
     try:
-        url = "https://news.google.com/rss/topics/CAAqJggBCiJCAqJggBCiJCAqJggBCiJCAqJggBCiJCAqJggBCiJCAqJggBCiJCAqJggB?hl=en-US&gl=US&ceid=US:en"
-        logger.info(f"Google News RSS 수집 중: {url}")
+        logger.info(f"Yahoo Finance News 수집 중: {url}")
         
-        # 우회 파싱 전략: session.get으로 XML 문자열을 먼저 가져옴
+        # curl_cffi Session 사용 (TLS Fingerprint 우회)
         response = _session.get(url, headers=HEADERS, timeout=15)
-        
-        # 상태 코드 확인 및 로깅
-        if response.status_code != 200:
-            logger.warning(f"Google News RSS 수집 실패: HTTP {response.status_code} - {response.reason}")
-            return f"[🌎 Global (Source: Google News US)]\n데이터 수집 실패 (HTTP {response.status_code})"
-        
         response.raise_for_status()
         
-        # XML 문자열을 직접 파싱 (우회 전략)
-        xml_string = response.text
-        feed = feedparser.parse(xml_string)
+        soup = BeautifulSoup(response.content, 'html.parser')
         
-        if not feed.entries:
-            logger.warning("Google News RSS: 피드 항목 없음")
-            return "[🌎 Global (Source: Google News US)]\n데이터 수집 실패"
-        
+        # 뉴스 헤드라인 추출: 모든 h3 태그에서 추출
         articles = []
-        for entry in feed.entries[:7]:  # 상위 7개
+        
+        # 모든 h3 태그에서 헤드라인 추출
+        h3_tags = soup.find_all('h3')
+        
+        for h3 in h3_tags:
             try:
-                title = entry.get('title', '').strip()
-                if title and len(title) > 10:
-                    articles.append(title)
+                # h3 내부의 링크 또는 텍스트 추출
+                link = h3.find('a')
+                if link:
+                    title = link.get_text(strip=True)
+                else:
+                    title = h3.get_text(strip=True)
+                
+                # 20자 이상인 것만 필터링 (광고 제외)
+                if title and len(title) >= 20:
+                    # 중복 제거
+                    if title not in articles:
+                        articles.append(title)
+                        
+                        if len(articles) >= 5:  # 상위 5개
+                            break
             except Exception as e:
-                logger.debug(f"Google News 항목 파싱 실패: {e}")
+                logger.debug(f"Yahoo News 항목 파싱 실패: {e}")
                 continue
         
         if articles:
-            result = "[🌎 Global (Source: Google News US)]\n"
-            for article in articles:
-                result += f"- {article}\n"
+            result = "[🌎 Global (Source: Yahoo Finance News)]\n"
+            for i, article in enumerate(articles, 1):
+                result += f"{i}. {article}\n"
             
-            logger.info(f"Google News RSS 수집 완료: {len(articles)}개")
-            print(f"✅ Google News RSS 수집 완료: {len(articles)}개")
+            logger.info(f"Yahoo Finance News 수집 완료: {len(articles)}개")
+            print(f"✅ Yahoo Finance News 수집 완료: {len(articles)}개")
             return result
         else:
-            result = "[🌎 Global (Source: Google News US)]\n데이터 수집 실패"
-            logger.warning("Google News RSS: 데이터 없음")
-            print("⚠️ Google News RSS: 데이터 없음")
+            result = "[🌎 Global (Source: Yahoo Finance News)]\n데이터 수집 실패"
+            logger.warning("Yahoo Finance News: 데이터 없음")
+            print("⚠️ Yahoo Finance News: 데이터 없음")
             return result
             
-    except requests.exceptions.HTTPError as e:
-        status_code = e.response.status_code if hasattr(e, 'response') and e.response else "Unknown"
-        logger.error(f"Google News RSS 수집 실패: HTTP {status_code} - {e}")
-        print(f"❌ Google News RSS 수집 실패: HTTP {status_code} - {e}")
-        return f"[🌎 Global (Source: Google News US)]\n데이터 수집 실패 (HTTP {status_code})"
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Google News RSS 수집 실패 (네트워크 오류): {e}")
-        print(f"❌ Google News RSS 수집 실패 (네트워크 오류): {e}")
-        return "[🌎 Global (Source: Google News US)]\n데이터 수집 실패 (네트워크 오류)"
+    except Exception as e:
+        logger.error(f"Yahoo Finance News 수집 실패: {e}")
+        print(f"❌ Yahoo Finance News 수집 실패: {e}")
+        return "[🌎 Global (Source: Yahoo Finance News)]\n데이터 수집 실패"
     except Exception as e:
         logger.error(f"Google News RSS 수집 실패: {e}")
         print(f"❌ Google News RSS 수집 실패: {e}")
@@ -1718,7 +1667,6 @@ def translate_headlines(headlines_text: str, ai_researcher=None) -> str:
             formatted_lines.append(f"<b>{number}. {title}</b>")
             if number in summary_map:
                 formatted_lines.append(f"   요약: {summary_map[number]}")
-            
             formatted_lines.append("")  # 빈 줄
         
         result = "\n".join(formatted_lines)

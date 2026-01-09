@@ -16,6 +16,7 @@ import logging
 import pytz
 import pandas as pd
 import numpy as np
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
@@ -722,41 +723,47 @@ def get_tradingview_technical_summary(tickers: List[str]) -> str:
     
     for ticker in tickers:
         try:
-            # 심볼 클렌징 및 거래소 매핑
+            # 심볼 정제: 모든 접미사 제거 (.KS, .KQ, .T 등)
             original_ticker = ticker
-            symbol = ticker
+            symbol = ticker.strip()
+            
+            # 모든 접미사 제거 (정제 강화)
+            for suffix in ['.KS', '.KQ', '.T', '.TO', '.L', '.HK', '.SS', '.SZ']:
+                if suffix in symbol:
+                    symbol = symbol.replace(suffix, '').strip()
+            
+            # 거래소 및 스크리너 초기화
             exchange = "NASDAQ"
             screener = "america"
-            
-            # 한국 주식 처리: .KS, .KQ 확장자 제거
-            # Exchange Auto-Discovery: 여러 거래소를 순차적으로 시도
             korean_exchanges = ["KRX", "KOSPI", "KOSDAQ"]
+            us_exchanges = ["NASDAQ", "NYSE", "AMEX"]
             is_korean_stock = False
+            is_crypto = False
             
-            if '.KS' in ticker or '.KQ' in ticker:
-                symbol = ticker.replace('.KS', '').replace('.KQ', '').strip()
+            # 한국 주식 판별: 숫자 6자리 또는 .KS/.KQ가 있었던 경우
+            if symbol.isdigit() and len(symbol) == 6:
                 screener = "south-korea"
                 is_korean_stock = True
-                # 한국 주식은 숫자 6자리 심볼인 경우 여러 거래소를 시도
-                if symbol.isdigit() and len(symbol) == 6:
-                    exchange = korean_exchanges[0]  # 첫 번째로 시도할 거래소
-                else:
-                    exchange = "KRX"  # 기본값
+                exchange = korean_exchanges[0]
             # 암호화폐 처리
-            elif '-USD' in ticker or '-KRW' in ticker:
-                # TradingView는 암호화폐를 직접 지원하지 않으므로 스킵
-                logger.debug(f"TradingView {ticker}: 암호화폐는 지원하지 않음, 스킵")
-                continue
+            elif '-USD' in original_ticker or '-KRW' in original_ticker or '-USDT' in original_ticker:
+                screener = "crypto"
+                is_crypto = True
+                exchange = "BINANCE"  # 암호화폐는 BINANCE 사용
             # 해외 주식 처리
-            elif ticker.startswith('^'):
-                symbol = ticker.replace('^', '').strip()
-                exchange = "NASDAQ"
+            elif original_ticker.startswith('^'):
+                symbol = original_ticker.replace('^', '').strip()
                 screener = "america"
+                exchange = us_exchanges[0]
             else:
                 # 기본값: 해외 주식으로 간주
-                symbol = ticker.strip()
-                exchange = "NASDAQ"
                 screener = "america"
+                exchange = us_exchanges[0]
+            
+            # 암호화폐는 스킵
+            if is_crypto:
+                logger.debug(f"TradingView {ticker}: 암호화폐는 지원하지 않음, 스킵")
+                continue
             
             # 심볼이 비어있으면 스킵
             if not symbol:
@@ -765,18 +772,21 @@ def get_tradingview_technical_summary(tickers: List[str]) -> str:
             
             # TradingView 분석 시도: Exchange Auto-Discovery
             analysis = None
-            exchanges_to_try = [exchange]
+            exchanges_to_try = []
             
-            # 한국 주식인 경우 (심볼이 숫자 6자리): 여러 거래소를 순차적으로 시도
-            if is_korean_stock and symbol.isdigit() and len(symbol) == 6:
+            # 한국 주식인 경우: 여러 거래소를 순차적으로 시도
+            if is_korean_stock:
                 exchanges_to_try = korean_exchanges
-            # 해외 주식인 경우 NASDAQ 실패 시 NYSE로 재시도
-            elif exchange == "NASDAQ" and screener == "america":
-                exchanges_to_try = ["NASDAQ", "NYSE"]
+            # 해외 주식인 경우: NASDAQ, NYSE, AMEX 순서로 시도
+            else:
+                exchanges_to_try = us_exchanges
             
             # 거래소 후보 리스트를 순차적으로 시도
-            for exchange_to_try in exchanges_to_try:
+            for idx, exchange_to_try in enumerate(exchanges_to_try):
                 try:
+                    # 속도 제어: 모든 요청 전에 1.5초 대기 (429 에러 방지)
+                    time.sleep(1.5)
+                    
                     # TradingView 핸들러 생성
                     handler = TA_Handler(
                         symbol=symbol,
@@ -800,9 +810,52 @@ def get_tradingview_technical_summary(tickers: List[str]) -> str:
                         logger.debug(f"TradingView {ticker} ({symbol}) {exchange_to_try} 실패, 다음 거래소 시도 중...")
                     continue
             
-            # 모든 거래소 시도 실패 시 None 반환
+            # 모든 거래소 시도 실패 시 Fallback: yfinance로 직접 RSI 계산
             if not analysis:
-                signals.append(f"- {original_ticker}: N/A (분석 실패)")
+                try:
+                    logger.info(f"TradingView 실패 ({original_ticker}), 로컬 계산으로 전환...")
+                    ticker_obj = yf.Ticker(original_ticker)
+                    hist = ticker_obj.history(period="1mo")
+                    
+                    if len(hist) > 14 and 'Close' in hist.columns:
+                        # RSI 계산 공식 적용 (RSI 14)
+                        delta = hist['Close'].diff()
+                        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                        
+                        # 0으로 나누기 방지
+                        rs = gain / (loss + 1e-10)  # 작은 값 추가하여 0으로 나누기 방지
+                        rsi = 100 - (100 / (1 + rs))
+                        current_rsi = rsi.iloc[-1]
+                        
+                        # RSI 값에 따른 매수/매도 시그널 매핑
+                        signal = "NEUTRAL"
+                        if current_rsi > 70:
+                            signal = "SELL"
+                        elif current_rsi < 30:
+                            signal = "BUY"
+                        elif current_rsi > 50:
+                            signal = "WEAK_BUY"
+                        elif current_rsi < 50:
+                            signal = "WEAK_SELL"
+                        
+                        # MACD 계산 (선택적)
+                        macd_line = hist['Close'].ewm(span=12).mean() - hist['Close'].ewm(span=26).mean()
+                        signal_line = macd_line.ewm(span=9).mean()
+                        current_macd = (macd_line.iloc[-1] - signal_line.iloc[-1])
+                        
+                        # SMA20 계산
+                        sma20 = hist['Close'].rolling(window=20).mean().iloc[-1]
+                        current_price = hist['Close'].iloc[-1]
+                        
+                        signals.append(f"- {original_ticker}: {signal} (RSI: {current_rsi:.1f}, MACD: {current_macd:.2f}, SMA20: {sma20:.2f} - Local Calc)")
+                        logger.info(f"로컬 계산 완료: {original_ticker} - {signal} (RSI: {current_rsi:.1f})")
+                    else:
+                        signals.append(f"- {original_ticker}: N/A (데이터 부족)")
+                        logger.warning(f"로컬 계산 실패: {original_ticker} - 데이터 부족")
+                except Exception as fallback_error:
+                    signals.append(f"- {original_ticker}: N/A (분석 실패)")
+                    logger.warning(f"로컬 계산 실패: {original_ticker} - {fallback_error}")
                 continue
             
             if analysis and hasattr(analysis, 'summary') and hasattr(analysis, 'indicators'):

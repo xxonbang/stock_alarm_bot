@@ -7,8 +7,8 @@ yfinance>=0.2.18,<1.0.0
 # Google AI (Gemini) - 최신 v2 SDK
 google-genai>=1.0.0
 
-# 텔레그램 봇
-requests>=2.31.0
+# 텔레그램 봇 (curl_cffi로 교체하여 TLS Fingerprint 차단 우회)
+curl_cffi>=0.7.0
 
 # 웹 크롤링
 beautifulsoup4>=4.11.1
