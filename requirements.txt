@@ -1,8 +1,8 @@
 # Stock Insight Bot 의존성 패키지
 
 # 주가 데이터 수집
-# Python 3.9 호환을 위해 버전 제한
-yfinance>=0.2.18,<1.0.0
+# 1.0 이상 버전 사용, 2.0 Breaking Change 방지
+yfinance>=1.0.0,<2.0.0
 
 # Google AI (Gemini) - 최신 v2 SDK
 google-genai>=1.0.0
