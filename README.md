@@ -200,7 +200,7 @@ stock-insight-bot/
 
 ### `src/ai_researcher.py`
 
-- **무료 티어 최적화**: Google Gemini Flash 모델 사용 (gemini-1.5-flash 우선)
+- **무료 티어 최적화**: Google Gemini Flash 모델 사용 (gemini-2.5-flash'우선)
 - **단 1회 API 호출**: 10회 반복 로직 제거, 통합 프롬프트로 모든 분석 수행
 - **429 에러 처리**: Quota exceeded 시 60초 대기 후 자동 재시도 (최대 3회)
 - **자체 검증**: AI가 엄격한 비평가 역할로 정보를 검증한 뒤 출력

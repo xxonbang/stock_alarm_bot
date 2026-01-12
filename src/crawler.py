@@ -99,7 +99,8 @@ _session = _create_session()
 
 def get_yahoo_finance_news(max_items: int = 10) -> List[Dict]:
     """
-    Yahoo Finance에서 뉴스 제목과 요약문 수집
+    yfinance 라이브러리를 사용하여 Yahoo Finance 뉴스 수집
+    웹 크롤링 대신 안정적인 API 사용
     
     Args:
         max_items: 최대 수집할 뉴스 개수
@@ -108,60 +109,76 @@ def get_yahoo_finance_news(max_items: int = 10) -> List[Dict]:
         [{"title": "...", "summary": "...", "link": "..."}, ...] 형태의 리스트
     """
     news_items = []
+    
+    # 시장을 대표하는 지수 티커 리스트 (시장 지수 및 주도주)
+    market_tickers = ['^GSPC', '^DJI', '^IXIC', 'NVDA', 'TSLA', 'AAPL']
+    
+    all_news = []
+    seen_titles = set()
+    
     try:
-        url = "https://finance.yahoo.com/news/"
-        logger.info(f"Yahoo Finance 뉴스 수집 중: {url}")
+        logger.info(f"yfinance를 사용한 Yahoo Finance 뉴스 수집 시작 (티커: {len(market_tickers)}개)")
         
-        response = _session.get(url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Yahoo Finance 뉴스 구조 파싱
-        # 여러 가능한 선택자 시도
-        article_selectors = [
-            'article[data-module="StreamItem"]',
-            '.js-stream-content li',
-            'li[class*="stream-item"]',
-            'article',
-        ]
-        
-        found_items = []
-        for selector in article_selectors:
-            articles = soup.select(selector)
-            for article in articles:
-                try:
-                    # 제목 추출
-                    title_elem = article.select_one('h3 a, h2 a, a[class*="title"]')
-                    if not title_elem:
-                        continue
-                    
-                    title = title_elem.get_text(strip=True)
-                    link = title_elem.get('href', '')
-                    if link and not link.startswith('http'):
-                        link = f"https://finance.yahoo.com{link}"
-                    
-                    # 요약문 추출
-                    summary_elem = article.select_one('p, .summary, [class*="summary"], [class*="description"]')
-                    summary = summary_elem.get_text(strip=True) if summary_elem else ""
-                    
-                    if title and len(title) > 10:
-                        found_items.append({
+        for ticker in market_tickers:
+            try:
+                ticker_obj = yf.Ticker(ticker)
+                news_list = ticker_obj.news
+                
+                if not news_list:
+                    logger.debug(f"{ticker}: 뉴스 없음")
+                    continue
+                
+                logger.info(f"{ticker}: {len(news_list)}개 뉴스 발견")
+                
+                for news_item in news_list:
+                    try:
+                        # yfinance 뉴스 구조: content.title, canonicalUrl.url, provider.displayName
+                        content = news_item.get('content', {})
+                        title = content.get('title', '') if isinstance(content, dict) else ''
+                        
+                        # link 추출
+                        canonical_url = news_item.get('canonicalUrl', {})
+                        link = canonical_url.get('url', '') if isinstance(canonical_url, dict) else ''
+                        
+                        # publisher 추출
+                        provider = news_item.get('provider', {})
+                        publisher = provider.get('displayName', 'Yahoo Finance') if isinstance(provider, dict) else 'Yahoo Finance'
+                        
+                        # summary 추출 (있는 경우)
+                        summary = content.get('summary', '') if isinstance(content, dict) else ''
+                        
+                        if not title:
+                            continue
+                        
+                        # 중복 제거 (제목 기준)
+                        title_lower = title.lower().strip()
+                        if title_lower in seen_titles:
+                            continue
+                        seen_titles.add(title_lower)
+                        
+                        all_news.append({
                             'title': title,
                             'summary': summary[:200] if summary else "",  # 요약문 최대 200자
-                            'link': link
+                            'link': link,
+                            'publisher': publisher
                         })
-                        if len(found_items) >= max_items:
+                        
+                        if len(all_news) >= max_items:
                             break
-                except Exception as e:
-                    logger.debug(f"뉴스 항목 파싱 실패: {e}")
-                    continue
+                            
+                    except Exception as e:
+                        logger.debug(f"뉴스 항목 파싱 실패 ({ticker}): {e}")
+                        continue
             
-            if len(found_items) >= max_items:
-                break
+                if len(all_news) >= max_items:
+                    break
         
-        news_items = found_items[:max_items]
-        logger.info(f"Yahoo Finance 뉴스 수집 완료: {len(news_items)}개")
+            except Exception as e:
+                logger.warning(f"{ticker} 뉴스 수집 실패: {e}")
+                continue
+        
+        news_items = all_news[:max_items]
+        logger.info(f"Yahoo Finance 뉴스 수집 완료: {len(news_items)}개 (yfinance 사용)")
         
     except Exception as e:
         logger.warning(f"Yahoo Finance 뉴스 수집 실패: {e}")
@@ -522,8 +539,9 @@ def get_market_indicators() -> str:
     indicators = []
     vix_value = None  # VIX 값을 저장하여 공포/탐욕 지수 계산에 사용
     
-    # Part B: yfinance로 수집 가능한 지표들 (FRED에 없는 것들)
+    # Part B: yfinance로 수집 가능한 지표들 (FRED 의존성 제거)
     macro_tickers = {
+        '^TNX': 'US 10Y Treasury',  # FRED DGS10 대체
         'CL=F': 'WTI 원유',
         'GC=F': '금 선물',
         '^VIX': 'VIX 변동성 지수',
@@ -561,6 +579,7 @@ def get_market_indicators() -> str:
                 if ticker == 'KRW=X':
                     price_str = f"{current_price:,.0f}"
                 elif ticker == '^TNX':
+                    # 10년물 국채는 퍼센트로 표시 (yfinance는 이미 퍼센트 단위)
                     price_str = f"{current_price:.2f}%"
                 elif ticker in ['CL=F', 'GC=F']:
                     price_str = f"${current_price:.2f}"
@@ -654,7 +673,7 @@ def get_fear_greed_index(vix_value: Optional[float] = None) -> Optional[str]:
                 
                 result = f"- 공포/탐욕 지수: {int(score)} ({classification}) {emoji} (CNN 공식)"
                 logger.info(f"✅ CNN API에서 공포/탐욕 지수 획득 성공: {int(score)} ({classification})")
-                return result
+            return result
     except Exception as e:
         logger.warning(f"CNN API 호출 실패, 자체 계산으로 Fallback: {e}")
     
@@ -952,13 +971,13 @@ def get_economic_calendar(max_retries: int = 3) -> str:
                             elif country != 'US' and importance < 3:
                                 continue  # 다른 국가는 중요도 3만 허용
                             
-                                events.append({
-                                    'name': event_name,
-                                    'time': event_time,
-                                    'country': country,
-                                    'importance': importance,
-                                    'date': event_date_str
-                                })
+                            events.append({
+                                'name': event_name,
+                                'time': event_time,
+                                'country': country,
+                                'importance': importance,
+                                'date': event_date_str
+                            })
                             
                             logger.debug(f"추출된 이벤트: {event_name} ({country}), 중요도: {importance}, 날짜: {event_date_str}, 시간: {event_time}")
                             
@@ -1145,8 +1164,8 @@ def get_us_top_movers(max_items: int = 10) -> str:
                     info = stock.info
                     
                     if not info:
-                                        continue
-                                    
+                        continue
+                    
                     # 등락률 확인
                     change_pct = info.get('regularMarketChangePercent', 0)
                     if change_pct and change_pct > 2.0:  # 2% 이상 급등주만
@@ -1231,8 +1250,8 @@ def get_korea_hot_themes(max_themes: int = 3) -> str:
             try:
                 cols = row.select('td')
                 if len(cols) < 2:
-                                        continue
-                                    
+                    continue
+                
                 # 테마명 (첫 번째 컬럼의 링크 텍스트)
                 theme_elem = cols[0].select_one('a')
                 if not theme_elem:
@@ -1327,7 +1346,7 @@ def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
                     if not news_list:
                         logger.debug(f"{ticker}: 뉴스 없음")
                         continue
-                            
+                    
                     logger.info(f"{ticker}: {len(news_list)}개 뉴스 발견")
                     
                     # 뉴스 필터링 (키워드 기반)
@@ -1369,9 +1388,9 @@ def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
                         except Exception as e:
                             logger.debug(f"뉴스 항목 파싱 실패: {e}")
                             continue
-            
-                        if len(all_articles) >= 10:
-                            break
+                    
+                    if len(all_articles) >= 10:
+                        break
                             
                 except Exception as e:
                     logger.warning(f"{ticker} 뉴스 수집 실패: {e}")
@@ -1599,43 +1618,52 @@ def get_google_news_rss() -> str:
     
     all_articles = []
     
-    # 1. Yahoo Finance News 수집
-    url = "https://finance.yahoo.com/topic/stock-market-news/"
+    # 1. Yahoo Finance News 수집 (yfinance 사용)
+    market_tickers = ['^GSPC', '^DJI', '^IXIC', 'NVDA', 'TSLA', 'AAPL']
     
     try:
-        logger.info(f"Yahoo Finance News 수집 중: {url}")
+        logger.info(f"yfinance를 사용한 Yahoo Finance News 수집 시작")
         
-        # curl_cffi Session 사용 (TLS Fingerprint 우회)
-        response = _session.get(url, headers=HEADERS, timeout=15)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # 뉴스 헤드라인 추출: 모든 h3 태그에서 추출
-        h3_tags = soup.find_all('h3')
-        
-        for h3 in h3_tags:
+        yahoo_news_count = 0
+        for ticker in market_tickers:
             try:
-                # h3 내부의 링크 또는 텍스트 추출
-                link = h3.find('a')
-                if link:
-                    title = link.get_text(strip=True)
-                else:
-                    title = h3.get_text(strip=True)
+                ticker_obj = yf.Ticker(ticker)
+                news_list = ticker_obj.news
                 
-                # 20자 이상인 것만 필터링 (광고 제외)
-                if title and len(title) >= 20:
-                    # 중복 제거
-                    if title not in all_articles:
-                        all_articles.append(f"[Yahoo Finance] {title}")
+                if not news_list:
+                    continue
+                
+                for news_item in news_list:
+                    try:
+                        content = news_item.get('content', {})
+                        title = content.get('title', '') if isinstance(content, dict) else ''
                         
-                        if len(all_articles) >= 5:  # Yahoo Finance는 상위 5개
+                        if not title or len(title) < 20:
+                            continue
+                        
+                        # 중복 제거
+                        title_lower = title.lower().strip()
+                        if any(title_lower in a.lower() for a in all_articles):
+                            continue
+                        
+                        all_articles.append(f"[Yahoo Finance] {title}")
+                        yahoo_news_count += 1
+                        
+                        if yahoo_news_count >= 5:  # Yahoo Finance는 상위 5개
                             break
+                            
+                    except Exception as e:
+                        logger.debug(f"Yahoo News 항목 파싱 실패: {e}")
+                        continue
+                
+                if yahoo_news_count >= 5:
+                    break
+                    
             except Exception as e:
-                logger.debug(f"Yahoo News 항목 파싱 실패: {e}")
+                logger.debug(f"{ticker} 뉴스 수집 실패: {e}")
                 continue
         
-        logger.info(f"Yahoo Finance News 수집 완료: {len([a for a in all_articles if '[Yahoo Finance]' in a])}개")
+        logger.info(f"Yahoo Finance News 수집 완료: {yahoo_news_count}개 (yfinance 사용)")
     except Exception as e:
         logger.warning(f"Yahoo Finance News 수집 실패: {e}")
     
