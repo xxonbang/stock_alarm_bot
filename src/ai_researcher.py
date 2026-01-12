@@ -193,6 +193,15 @@ class AIResearcher:
         """
         logger.info("=== AI 요약 코멘트 생성 시작 ===")
         
+        # collected_data 내용 로깅 (디버깅용)
+        logger.info("=" * 80)
+        logger.info("[LLM에 전달되는 collected_data 내용]")
+        logger.info("=" * 80)
+        logger.info(collected_data)
+        logger.info("=" * 80)
+        logger.info(f"[collected_data 통계] 총 {len(collected_data)}자, {len(collected_data.splitlines())}줄")
+        logger.info("=" * 80)
+        
         prompt = f"""당신은 월스트리트에서 20년 이상의 경력을 가진 수석 마켓 스트래티지스트(Chief Market Strategist)입니다.
 당신의 임무는 제공된 [입력 데이터](주가/기술적 지표, 매크로 지표, 뉴스 데이터 등)를 심층 분석하고, WEB을 통해 가장 최신의 실시간 정보를 검색 후 양질의 정보를 선별하고 연구하여 투자자에게 실질적인 도움이 되는 고품질의 투자 리포트를 작성하는 것입니다.
 

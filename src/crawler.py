@@ -14,7 +14,10 @@ try:
     CURL_CFFI_AVAILABLE = True
 except ImportError:
     # curl_cffi가 없으면 일반 requests 사용 (fallback)
-    import requests
+    try:
+import requests
+    except ImportError:
+        requests = None
     CURL_CFFI_AVAILABLE = False
 
 from bs4 import BeautifulSoup
@@ -22,10 +25,18 @@ import logging
 from typing import List, Dict, Optional
 import time
 import yfinance as yf
+import pandas as pd
 from datetime import datetime, timedelta
 import os
 import re
 import warnings
+
+# Settings import (포트폴리오 종목 정보용)
+try:
+    from config.settings import settings
+except ImportError:
+    # settings를 사용할 수 없는 경우를 위한 fallback
+    settings = None
 try:
     import feedparser
 except ImportError:
@@ -226,48 +237,63 @@ def get_naver_finance_news(max_items: int = 10) -> List[Dict]:
     return news_items
 
 
-def filter_relevant_news(news_items: List[Dict]) -> List[Dict]:
+def filter_relevant_news(news_items: List[Dict], max_items: int = 7) -> List[Dict]:
     """
-    포트폴리오와 관련된 뉴스만 필터링 (노이즈 제거)
-    가중치 시스템 적용: 높은 가중치 키워드 매칭 시 우선순위 부여
+    포트폴리오 집중형 Smart Filter: 내 종목 우선 필터링
+    내 포트폴리오 종목(티커/기업명) 매칭 시 +5점, 일반 시장 키워드는 +2점
     
     Args:
         news_items: 뉴스 아이템 리스트
+        max_items: 최종 선택할 뉴스 개수 (기본값: 7개)
     
     Returns:
-        필터링된 뉴스 아이템 리스트 (가중치 순으로 정렬)
+        필터링된 뉴스 아이템 리스트 (가중치 순으로 정렬, 상위 max_items개)
     """
-    # 포트폴리오 관련 키워드 (가중치별 분류)
-    keyword_weights = {
-        'high': [
-            # 핵심 종목명
-            'nvidia', 'nvda', 'tesla', 'tsla', 'apple', 'aapl', 'google', 'googl', 'microsoft', 'msft',
-            'samsung', 'sk hynix', 'hynix',
-            # 핵심 매크로 지표
+    # 포트폴리오 종목 정보 가져오기
+    portfolio_tickers = []
+    portfolio_names = {}
+    
+    if settings and hasattr(settings, 'tickers'):
+        portfolio_tickers = settings.tickers
+        
+        # 티커를 기업명으로 매핑 (기본 매핑)
+        ticker_name_mapping = {
+            # 해외 종목
+            'TSLA': ['tesla', '테슬라'],
+            'NVDA': ['nvidia', '엔비디아'],
+            'AAPL': ['apple', '애플'],
+            'GOOGL': ['google', 'alphabet', '구글'],
+            'MSFT': ['microsoft', '마이크로소프트'],
+            'SPY': ['s&p 500', 'sp500', 's&p500'],
+            'QQQ': ['nasdaq', '나스닥'],
+            'VTI': ['total stock market', 'vanguard total'],
+            'GLD': ['gold', 'spdr gold', '금'],
+            'SLV': ['silver', 'ishares silver', '은'],
+            'BTC-USD': ['bitcoin', 'btc', '비트코인'],
+            'ETH-USD': ['ethereum', 'eth', '이더리움'],
+            # 국내 종목
+            '005930.KS': ['samsung', '삼성전자', '삼성'],
+            '000660.KS': ['sk hynix', 'hynix', 'sk하이닉스', '하이닉스'],
+        }
+        
+        # 포트폴리오 티커에 대한 기업명 수집
+        for ticker in portfolio_tickers:
+            if ticker in ticker_name_mapping:
+                portfolio_names[ticker] = ticker_name_mapping[ticker]
+            else:
+                # 기본 티커명도 추가 (대소문자 구분 없이)
+                ticker_clean = ticker.replace('.KS', '').replace('.KQ', '').replace('-USD', '')
+                if ticker_clean not in portfolio_names:
+                    portfolio_names[ticker] = [ticker_clean.lower()]
+    
+    # 일반 시장 키워드 (가중치 +2점)
+    market_keywords = [
             'fed', 'federal reserve', 'interest rate', 'cpi', 'inflation', 'unemployment',
-            # 핵심 원자재
-            'gold', 'silver', 'oil', 'crude',
-            # 핵심 암호화폐
-            'bitcoin', 'btc', 'ethereum', 'eth',
-            # 핵심 지수
-            's&p', 'sp500', 'nasdaq', 'dow', 'kospi', 'kosdaq'
-        ],
-        'medium': [
-            # 기술/반도체 일반
-            'ai', 'artificial intelligence', 'tech', 'technology', 'semiconductor', 'chip',
-            # 에너지 일반
-            'energy', 'petroleum',
-            # 암호화폐 일반
-            'crypto', 'cryptocurrency',
-            # 금리/채권
-            'treasury', 'bond', 'yield', 'rate'
-        ],
-        'low': [
-            # 시장 전반 (너무 일반적이어서 낮은 가중치)
-            'market', 'trading', 'investment', 'investor', 'equity', 'stock', 'index', 'etf',
-            'economic', 'economy'
-        ]
-    }
+        'treasury', 'bond', 'yield', 'rate', 'gdp', 'employment',
+        'gold', 'silver', 'oil', 'crude', 'energy',
+        's&p', 'sp500', 'nasdaq', 'dow', 'kospi', 'kosdaq',
+        'ai', 'artificial intelligence', 'tech', 'technology', 'semiconductor', 'chip'
+    ]
     
     scored_news = []
     for news in news_items:
@@ -279,16 +305,37 @@ def filter_relevant_news(news_items: List[Dict]) -> List[Dict]:
         score = 0
         matched_keywords = []
         
-        for weight_level, keywords in keyword_weights.items():
-            weight_value = {'high': 3, 'medium': 2, 'low': 1}[weight_level]
-            for keyword in keywords:
-                if keyword in combined_text:
-                    score += weight_value
-                    matched_keywords.append(keyword)
-                    break  # 같은 가중치 레벨에서는 첫 매칭만 카운트
+        # 1. 내 포트폴리오 종목 매칭 (+5점)
+        portfolio_matched = False
+        for ticker, names in portfolio_names.items():
+            # 티커 자체 매칭 (단어 경계 고려)
+            ticker_clean = ticker.replace('.KS', '').replace('.KQ', '').replace('-USD', '')
+            if re.search(r'\b' + re.escape(ticker_clean) + r'\b', combined_text, re.IGNORECASE):
+                score += 5
+                matched_keywords.append(f"포트폴리오:{ticker_clean}")
+                portfolio_matched = True
+                break
+            
+            # 기업명 매칭
+            for name in names:
+                if name.lower() in combined_text:
+                    score += 5
+                    matched_keywords.append(f"포트폴리오:{name}")
+                    portfolio_matched = True
+                    break
+            
+            if portfolio_matched:
+                break
         
-        # 최소 점수 이상만 포함 (low만 매칭된 경우 제외)
-        if score >= 2:  # high 1개 또는 medium 1개 이상
+        # 2. 일반 시장 키워드 매칭 (+2점)
+        for keyword in market_keywords:
+            if keyword.lower() in combined_text:
+                score += 2
+                    matched_keywords.append(keyword)
+                break  # 첫 매칭만 카운트
+        
+        # 최소 점수 이상만 포함
+        if score >= 2:  # 최소 2점 이상
             scored_news.append({
                 'news': news,
                 'score': score,
@@ -299,11 +346,14 @@ def filter_relevant_news(news_items: List[Dict]) -> List[Dict]:
     
     # 가중치 순으로 정렬 (높은 점수 우선)
     scored_news.sort(key=lambda x: x['score'], reverse=True)
-    filtered_news = [item['news'] for item in scored_news]
     
-    logger.info(f"뉴스 필터링: {len(news_items)}개 -> {len(filtered_news)}개 (포트폴리오 관련, 가중치 적용)")
+    # 상위 max_items개만 선택
+    filtered_news = [item['news'] for item in scored_news[:max_items]]
+    
+    logger.info(f"뉴스 필터링: {len(news_items)}개 -> {len(filtered_news)}개 (포트폴리오 집중형, 상위 {max_items}개)")
     if scored_news:
         logger.debug(f"상위 3개 뉴스 점수: {[item['score'] for item in scored_news[:3]]}")
+        logger.debug(f"상위 3개 뉴스 키워드: {[item['keywords'] for item in scored_news[:3]]}")
     
     return filtered_news
 
@@ -333,8 +383,8 @@ def get_market_news_with_context(max_items: int = 10) -> str:
     if naver_news:
         all_news.extend(naver_news)
     
-    # 포트폴리오 관련 뉴스만 필터링
-    filtered_news = filter_relevant_news(all_news)
+    # 포트폴리오 관련 뉴스만 필터링 (Smart Filter: 내 종목 우선)
+    filtered_news = filter_relevant_news(all_news, max_items=max_items)
     
     # 중복 제거 (제목 기준)
     unique_news = []
@@ -402,11 +452,6 @@ def get_fred_macro_data() -> str:
                 'name': 'Inflation Expectation',
                 'description': 'Breakeven Inflation Rate',
                 'format': 'percent'
-            },
-            'DEXKOUS': {
-                'name': 'USD/KRW',
-                'description': 'South Korea / U.S. Foreign Exchange Rate',
-                'format': 'decimal'
             }
         }
         
@@ -432,10 +477,7 @@ def get_fred_macro_data() -> str:
                         else:
                             value_str = f"{latest_value:.2f}%"
                     else:
-                        if series_id == 'DEXKOUS':
-                            value_str = f"{latest_value:.2f}"
-                        else:
-                            value_str = f"{latest_value:.2f}"
+                        value_str = f"{latest_value:.2f}"
                     
                     # 경고 메시지 추가
                     warning = ""
@@ -478,12 +520,14 @@ def get_market_indicators() -> str:
     fred_data = get_fred_macro_data()
     
     indicators = []
+    vix_value = None  # VIX 값을 저장하여 공포/탐욕 지수 계산에 사용
     
     # Part B: yfinance로 수집 가능한 지표들 (FRED에 없는 것들)
     macro_tickers = {
         'CL=F': 'WTI 원유',
         'GC=F': '금 선물',
         '^VIX': 'VIX 변동성 지수',
+        'KRW=X': 'USD/KRW 환율',
     }
     
     for ticker, name in macro_tickers.items():
@@ -530,12 +574,16 @@ def get_market_indicators() -> str:
                 
                 indicators.append(f"- {name}: {price_str}{change_str}")
                 logger.info(f"{name} 수집 완료: {price_str}{change_str}")
+                
+                # VIX 값 저장 (공포/탐욕 지수 계산에 사용)
+                if ticker == '^VIX' and current_price:
+                    vix_value = current_price
         except Exception as e:
             logger.warning(f"{name} ({ticker}) 수집 실패: {e}")
             indicators.append(f"- {name}: N/A")
     
     # Part C: 공포/탐욕 지수 (Fear & Greed Index)
-    fear_greed = get_fear_greed_index()
+    fear_greed = get_fear_greed_index(vix_value)
     if fear_greed:
         indicators.append(fear_greed.replace("**", ""))
     
@@ -551,108 +599,185 @@ def get_market_indicators() -> str:
     return result
 
 
-def get_fear_greed_index() -> Optional[str]:
+def get_fear_greed_index(vix_value: Optional[float] = None) -> Optional[str]:
     """
-    공포/탐욕 지수 (Fear & Greed Index) 수집 (세부 지표 포함)
-    CNN Business 또는 Alternative.me에서 수집 시도
+    공포/탐욕 지수 (Fear & Greed Index) CNN API에서 직접 획득
+    CNN API 실패 시 자체 계산으로 Fallback
+    
+    Args:
+        vix_value: VIX 변동성 지수 값 (fallback 계산용)
     
     Returns:
-        포맷팅된 공포/탐욕 지수 문자열 (세부 지표 포함) 또는 None
+        포맷팅된 공포/탐욕 지수 문자열
     """
+    logger.info("공포/탐욕 지수 CNN API에서 직접 획득 시도...")
+    
+    # CNN API 직접 호출 시도
     try:
-        # Alternative.me Fear & Greed Index (무료 API)
-        url = "https://api.alternative.me/fng/"
-        logger.info("공포/탐욕 지수 수집 중...")
+        url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
+            'Referer': 'https://edition.cnn.com/markets/fear-and-greed',
+            'Accept': 'application/json, text/plain, */*'
+        }
         
-        response = _session.get(url, headers=HEADERS, timeout=10)
+        response = _session.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
         data = response.json()
         
-        if 'data' in data and len(data['data']) > 0:
-            latest = data['data'][0]
-            value = int(latest.get('value', 0))
-            classification = latest.get('value_classification', 'N/A')
+        # fear_and_greed 객체에서 score 추출
+        if 'fear_and_greed' in data:
+            fng_data = data['fear_and_greed']
+            score = fng_data.get('score')
+            rating = fng_data.get('rating', 'neutral')
             
-            # 이모지 추가
-            if value <= 25:
-                emoji = "😨"  # Extreme Fear
-            elif value <= 45:
-                emoji = "😟"  # Fear
-            elif value <= 55:
-                emoji = "😐"  # Neutral
-            elif value <= 75:
-                emoji = "😊"  # Greed
+            if score is not None:
+                score = float(score)
+                
+                # 분류 및 이모지
+                if score <= 25:
+                    classification = "Extreme Fear"
+                    emoji = "😨"
+                elif score <= 45:
+                    classification = "Fear"
+                    emoji = "😟"
+                elif score <= 55:
+                    classification = "Neutral"
+                    emoji = "😐"
+                elif score <= 75:
+                    classification = "Greed"
+                    emoji = "😊"
             else:
-                emoji = "🚀"  # Extreme Greed
+                    classification = "Extreme Greed"
+                    emoji = "🚀"
             
-            result = f"- 공포/탐욕 지수: {value} ({classification}) {emoji}"
-            logger.info(f"공포/탐욕 지수 수집 완료: {value} ({classification})")
+                result = f"- 공포/탐욕 지수: {int(score)} ({classification}) {emoji} (CNN 공식)"
+                logger.info(f"✅ CNN API에서 공포/탐욕 지수 획득 성공: {int(score)} ({classification})")
             return result
     except Exception as e:
-        logger.warning(f"공포/탐욕 지수 수집 실패: {e}")
+        logger.warning(f"CNN API 호출 실패, 자체 계산으로 Fallback: {e}")
     
-    # Fallback: CNN Business 크롤링 시도 (세부 지표 포함)
+    # Fallback: 자체 계산
+    logger.info("공포/탐욕 지수 자체 계산 중...")
+    
+    # VIX 값이 없으면 yfinance로 조회
+    if vix_value is None:
+        try:
+            vix_ticker = yf.Ticker('^VIX')
+            vix_info = vix_ticker.info
+            if 'regularMarketPrice' in vix_info:
+                vix_value = vix_info['regularMarketPrice']
+            else:
+                vix_hist = vix_ticker.history(period="1d")
+                if not vix_hist.empty:
+                    vix_value = float(vix_hist['Close'].iloc[-1])
+        except Exception as e:
+            logger.warning(f"VIX 조회 실패: {e}")
+            return None
+    
+    # 시장 대표 RSI 계산 (S&P500) - Wilder's Smoothing 방식 사용
+    market_rsi = None
     try:
-        url = "https://www.cnn.com/markets/fear-and-greed"
-        response = _session.get(url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
+        spy_ticker = yf.Ticker('SPY')
+        spy_hist = spy_ticker.history(period="3mo", auto_adjust=True)
         
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # 종합 점수 파싱
-        value = None
-        value_elem = soup.select_one('[class*="fear"], [class*="greed"], [id*="fear"], [id*="greed"]')
-        if value_elem:
-            text = value_elem.get_text(strip=True)
-            import re
-            numbers = re.findall(r'\d+', text)
-            if numbers:
-                value = int(numbers[0])
-        
-        # 세부 지표 파싱 시도 (7가지)
-        detail_indicators = []
-        detail_selectors = [
-            'div[class*="indicator"]',
-            '.market-indicator',
-            '[data-module="MarketIndicator"]'
-        ]
-        
-        for selector in detail_selectors:
-            indicators = soup.select(selector)
-            if indicators:
-                for indicator in indicators[:7]:  # 최대 7개
-                    try:
-                        name_elem = indicator.select_one('span, .name, [class*="name"]')
-                        value_elem = indicator.select_one('.value, [class*="value"]')
-                        if name_elem and value_elem:
-                            name = name_elem.get_text(strip=True)
-                            value_text = value_elem.get_text(strip=True)
-                            if name and value_text:
-                                detail_indicators.append(f"{name}: {value_text}")
-                    except Exception:
-                        continue
-                if detail_indicators:
-                    break
-        
-        # 결과 포맷팅
-        if value is not None and 0 <= value <= 100:
-            classification = "Extreme Fear" if value <= 25 else "Fear" if value <= 45 else "Neutral" if value <= 55 else "Greed" if value <= 75 else "Extreme Greed"
-            emoji = "😨" if value <= 25 else "😟" if value <= 45 else "😐" if value <= 55 else "😊" if value <= 75 else "🚀"
+        if not spy_hist.empty and len(spy_hist) > 14:
+            # Wilder's Smoothing 방식으로 RSI 계산
+            close = spy_hist['Close']
+            delta = close.diff()
+            gain = delta.where(delta > 0, 0)
+            loss = -delta.where(delta < 0, 0)
             
-            result = f"- 공포/탐욕 지수: {value} ({classification}) {emoji}"
+            # Wilder's Smoothing (RMA)
+            period = 14
+            avg_gain = pd.Series(index=close.index, dtype=float)
+            avg_loss = pd.Series(index=close.index, dtype=float)
+            avg_gain.iloc[period] = gain.iloc[1:period+1].mean()
+            avg_loss.iloc[period] = loss.iloc[1:period+1].mean()
             
-            # 세부 지표 추가
-            if detail_indicators:
-                result += "\n  세부 지표:"
-                for indicator in detail_indicators[:5]:  # 최대 5개
-                    result += f"\n    • {indicator}"
+            for i in range(period + 1, len(close)):
+                avg_gain.iloc[i] = (avg_gain.iloc[i-1] * (period - 1) + gain.iloc[i]) / period
+                avg_loss.iloc[i] = (avg_loss.iloc[i-1] * (period - 1) + loss.iloc[i]) / period
             
-            logger.info(f"공포/탐욕 지수 수집 완료 (CNN): {value}, 세부 지표 {len(detail_indicators)}개")
+            rs = avg_gain / (avg_loss + 1e-10)
+            rsi = 100 - (100 / (1 + rs))
+            market_rsi = float(rsi.iloc[-1])
+            logger.info(f"S&P500 RSI 계산 완료 (Wilder's): {market_rsi:.2f}")
+    except Exception as e:
+        logger.warning(f"S&P500 RSI 계산 실패: {e}")
+    
+    # 공포/탐욕 지수 계산 (개선된 버전)
+    # CNN Fear & Greed Index는 7개 지표를 동등 가중치로 평균합니다.
+    # 현재는 VIX와 RSI만 사용 가능하므로, 나머지 5개 지표를 중립(50)으로 가정합니다.
+    # 공식: (VIX_정규화 + RSI_조정 + 50*5) / 7
+    try:
+        # VIX 정규화 개선: 동적 범위 사용 (고정 범위 5-50 대신)
+        # VIX는 일반적으로 10-30 범위, 극단적으로 5-80까지 가능
+        # 최근 1년 데이터 기반 백분위수 사용 (없으면 고정 범위 사용)
+        try:
+            vix_ticker = yf.Ticker('^VIX')
+            vix_hist = vix_ticker.history(period="1y")
+            if not vix_hist.empty and len(vix_hist) > 20:
+                vix_values = vix_hist['Close']
+                vix_min = vix_values.quantile(0.05)  # 5% 백분위수
+                vix_max = vix_values.quantile(0.95)  # 95% 백분위수
+                # 안전장치: 범위가 너무 좁으면 고정 범위 사용
+                if vix_max - vix_min < 10:
+                    vix_min, vix_max = 5, 50
+            else:
+                vix_min, vix_max = 5, 50
+        except:
+            # 백분위수 계산 실패 시 고정 범위 사용
+            vix_min, vix_max = 5, 50
+        
+        # VIX 정규화: VIX가 낮을수록 탐욕 (높은 점수)
+        # 공식: (vix_max - VIX) / (vix_max - vix_min) * 100
+        vix_range = vix_max - vix_min
+        if vix_range > 0:
+            vix_normalized = max(0, min(100, (vix_max - vix_value) / vix_range * 100))
+        else:
+            vix_normalized = 50  # 범위가 0이면 중립
+        
+        # RSI 조정 개선: 0.5 배수 제거 (RSI는 이미 0-100 범위)
+        # RSI가 높을수록 탐욕이므로 그대로 사용
+        if market_rsi is not None:
+            rsi_adjusted = market_rsi  # 조정 없이 그대로 사용
+        else:
+            rsi_adjusted = 50  # RSI 계산 실패 시 중립으로 처리
+        
+        # 7개 지표 평균 (VIX, RSI + 나머지 5개를 중립 50으로 가정)
+        calculated_value = (vix_normalized + rsi_adjusted + 50 * 5) / 7
+        calculated_value = max(0, min(100, calculated_value))  # 0~100 범위로 제한
+        
+        # 분류 및 이모지
+        if calculated_value <= 25:
+            classification = "Extreme Fear"
+            emoji = "😨"
+        elif calculated_value <= 45:
+            classification = "Fear"
+            emoji = "😟"
+        elif calculated_value <= 55:
+            classification = "Neutral"
+            emoji = "😐"
+        elif calculated_value <= 75:
+            classification = "Greed"
+            emoji = "😊"
+        else:
+            classification = "Extreme Greed"
+            emoji = "🚀"
+        
+        # 계산 상세 정보 포함
+        calc_detail = f"VIX: {vix_value:.2f} (범위: {vix_min:.1f}-{vix_max:.1f}, 정규화: {vix_normalized:.1f})"
+        if market_rsi is not None:
+            calc_detail += f", S&P500 RSI: {market_rsi:.1f}"
+        
+        result = f"- 공포/탐욕 지수: {int(calculated_value)} ({classification}) {emoji} (자체 계산: {calc_detail})"
+        rsi_str = f"{market_rsi:.1f}" if market_rsi is not None else "N/A"
+        logger.info(f"공포/탐욕 지수 자체 계산 완료: {int(calculated_value)} ({classification}) - VIX: {vix_value:.2f}, RSI: {rsi_str}")
             return result
     except Exception as e:
-        logger.debug(f"CNN 공포/탐욕 지수 크롤링 실패: {e}")
-    
+        logger.error(f"공포/탐욕 지수 계산 실패: {e}")
     return None
 
 
@@ -967,7 +1092,7 @@ def get_us_top_movers(max_items: int = 10) -> str:
                             price_text = td_text
                             break
                         except ValueError:
-                            continue
+                        continue
                 # 필터링: 나스닥 100 또는 S&P 500 구성 종목만 (잡주 제외)
                 # 시가총액이 큰 종목만 필터링하기 위해 가격이 $5 이상인 종목만
                 if ticker and name and change_pct_text:
@@ -1071,8 +1196,8 @@ def get_us_top_movers(max_items: int = 10) -> str:
 
 def get_korea_hot_themes(max_themes: int = 3) -> str:
     """
-    네이버 모바일 API를 통해 오늘의 강세 테마 수집
-    HTML 파싱 대신 JSON API를 직접 호출하여 안정적으로 데이터 수집
+    네이버 금융 PC 페이지 파싱을 통한 테마 수집
+    API 차단을 피하기 위해 HTML 파싱 방식을 사용
     
     Args:
         max_themes: 최대 수집할 테마 개수
@@ -1083,169 +1208,74 @@ def get_korea_hot_themes(max_themes: int = 3) -> str:
     logger.info("=== 한국 시장 Hot Themes 수집 시작 ===")
     print("=== 한국 시장 Hot Themes 수집 시작 ===")
     
+    url = "https://finance.naver.com/sise/theme.naver"
+    themes = []
+    
     try:
-        # 방법 1: 네이버 모바일 증권 API 시도 (우선 시도)
-        mobile_api_success = False
-        themes = []
+        # curl_cffi로 PC 페이지 접근
+        response = _session.get(url, headers=HEADERS, timeout=15)
+        response.raise_for_status()
         
+        # EUC-KR 디코딩 필수
         try:
-            url = "https://m.stock.naver.com/api/json/theme/merged/list"
-            params = {"page": 1, "pageSize": 5}
-            logger.info(f"네이버 모바일 API 호출 시도: {url}")
+            content = response.content.decode('euc-kr', 'replace')
+        except:
+            content = response.text
             
-            mobile_headers = {
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
-                "Referer": "https://m.stock.naver.com/domestic/theme",  # 핵심: 이 헤더가 없으면 404/403 발생
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "ko-KR,ko;q=0.9",
-                "Origin": "https://m.stock.naver.com"
-            }
-            
-            response = _session.get(url, headers=mobile_headers, params=params, timeout=15)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if 'result' in data and 'list' in data['result']:
-                    theme_list = data['result']['list']
-                    
-                    for item in theme_list[:max_themes * 2]:
-                        try:
-                            theme_name = item.get('name', '').strip()
-                            change_rate = item.get('changeRate', 0)
-                            leading_stock = item.get('leadingStock', {})
-                            
-                            if not theme_name or len(theme_name) < 2:
-                                continue
-                            
-                            if change_rate and isinstance(change_rate, (int, float)) and change_rate >= 0.1:
-                                stocks = []
-                                if leading_stock and isinstance(leading_stock, dict):
-                                    stock_name = leading_stock.get('name', '')
-                                    stock_change = leading_stock.get('changeRate', 0)
-                                    if stock_name:
-                                        stocks.append({
-                                            'name': stock_name,
-                                            'change': stock_change if isinstance(stock_change, (int, float)) else 0
-                                        })
-                                
-                                themes.append({
-                                    'name': theme_name,
-                                    'change': float(change_rate),
-                                    'stocks': stocks
-                                })
-                                
-                                if len(themes) >= max_themes:
-                                    break
-                        except Exception as e:
-                            logger.debug(f"테마 항목 파싱 실패: {e}")
-                            continue
-                            
-                    if themes:
-                        mobile_api_success = True
-                        logger.info("네이버 모바일 API 성공")
-        except Exception as e:
-            logger.debug(f"모바일 API 호출 실패: {e}, PC 페이지로 Fallback")
+        soup = BeautifulSoup(content, 'html.parser')
         
-        # 방법 2: 모바일 API 실패 시 PC 페이지 HTML 파싱 (Fallback)
-        if not mobile_api_success:
-            logger.info("PC 페이지 HTML 파싱으로 Fallback")
-            url = "https://finance.naver.com/sise/theme.naver"
-            response = _session.get(url, headers=HEADERS, timeout=15)
-            response.raise_for_status()
-            
+        # 테이블 행 파싱
+        rows = soup.select('table.type_1 tr')
+        
+        for row in rows:
             try:
-                content = response.content.decode('euc-kr', 'replace')
-            except (UnicodeDecodeError, AttributeError):
-                content = response.text
-            
-            soup = BeautifulSoup(content, 'html.parser')
-            
-            # 테마 리스트 추출: Index-Based Parsing
-            rows = soup.find_all('tr')
-            
-            for row in rows[:100]:
-                try:
-                    tds = row.find_all('td')
-                    if len(tds) < 3:
-                        continue
-                    
-                    first_td = tds[0]
-                    theme_link = first_td.find('a')
-                    if not theme_link:
-                        continue
-                    
-                    theme_name = theme_link.get_text(strip=True)
-                    if not theme_name or len(theme_name) < 2:
-                        continue
-                    
-                    # 등락률 추출
-                    change_pct = None
-                    for td in tds[1:]:
-                        td_text = td.get_text(strip=True)
-                        if '%' in td_text:
-                            match = re.search(r'([+-]?)(\d+\.?\d*)%?', td_text)
-                            if match:
-                                sign = match.group(1)
-                                num_str = match.group(2)
-                                try:
-                                    num = float(num_str)
-                                    if num >= 0.1 and (sign == '+' or (sign == '' and num > 0)):
-                                        change_pct = num
-                                        break
-                                except:
-                                    pass
-                    
-                    if theme_name and change_pct is not None and change_pct > 0:
-                        if not any(t['name'] == theme_name for t in themes):
-                            themes.append({
-                                'name': theme_name,
-                                'change': change_pct,
-                                'stocks': []
-                            })
-                            
-                            if len(themes) >= max_themes:
-                                break
-                except Exception as e:
-                    logger.debug(f"테마 행 파싱 실패: {e}")
+                cols = row.select('td')
+                if len(cols) < 2:
+                                        continue
+                                    
+                # 테마명 (첫 번째 컬럼의 링크 텍스트)
+                theme_elem = cols[0].select_one('a')
+                if not theme_elem:
                     continue
-        
-        # 등락률 기준으로 정렬 (내림차순)
-        themes.sort(key=lambda x: x['change'], reverse=True)
-        themes = themes[:max_themes]
-        
-        if not themes:
-            logger.warning("Hot Themes: 테마 데이터 없음")
-            return "**🔥 오늘의 강세 테마 (한국):**\n테마 데이터 수집 실패"
-        
-        # 결과 포맷팅
-        result_lines = ["**🔥 오늘의 강세 테마 (한국):**"]
-        
-        for i, theme in enumerate(themes, 1):
-            theme_line = f"{i}. {theme['name']} (+{theme['change']:.2f}%)"
-            
-            # 주도주 정보 추가
-            if theme.get('stocks'):
-                stock_info = []
-                for stock in theme['stocks'][:2]:  # 상위 2개만
-                    stock_name = stock.get('name', '')
-                    stock_change = stock.get('change', 0)
-                    if stock_name:
-                        stock_info.append(f"{stock_name} (+{stock_change:.2f}%)")
+                theme_name = theme_elem.get_text(strip=True)
                 
-                if stock_info:
-                    theme_line += f"\n   주도주: {', '.join(stock_info)}"
+                # 등락률 (두 번째 컬럼)
+                change_elem = cols[1].select_one('span')
+                if not change_elem:
+                    continue
+                change_text = change_elem.get_text(strip=True).replace('%', '')
+                
+                try:
+                    change_rate = float(change_text)
+                except:
+                    continue
+                
+                # 상승 테마만 수집 (0.5% 이상)
+                if change_rate > 0.5:
+                    themes.append({
+                        'name': theme_name,
+                        'change': change_rate
+                    })
+                    
+                if len(themes) >= max_themes:
+                    break
+                    
+            except Exception:
+                continue
+                
+        if themes:
+            result = "**🚀 오늘의 강세 테마 (한국):**\n"
+            for i, t in enumerate(themes, 1):
+                result += f"{i}. {t['name']} (+{t['change']:.2f}%)\n"
+            logger.info(f"Hot Themes 수집 완료: {len(themes)}개")
+            print(f"✅ Hot Themes 수집 완료: {len(themes)}개")
+            return result
+        else:
+            return "**🚀 오늘의 강세 테마:**\n뚜렷한 강세 테마 없음"
             
-            result_lines.append(theme_line)
-        
-        result = "\n".join(result_lines)
-        logger.info(f"Hot Themes 수집 완료: {len(themes)}개")
-        print(f"✅ Hot Themes 수집 완료: {len(themes)}개")
-        return result
-                        
-    except Exception as e:
-        logger.error(f"Hot Themes 수집 실패: {e}")
-        print(f"❌ Hot Themes 수집 실패: {e}")
-        return "**🔥 오늘의 강세 테마 (한국):**\n테마 데이터 수집 실패"
+                                except Exception as e:
+        logger.error(f"테마 수집 실패: {e}")
+        return "**🚀 오늘의 강세 테마:**\n수집 실패"
 
 
 def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
@@ -1296,8 +1326,8 @@ def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
                     
                     if not news_list:
                         logger.debug(f"{ticker}: 뉴스 없음")
-                    continue
-            
+                                    continue
+                            
                     logger.info(f"{ticker}: {len(news_list)}개 뉴스 발견")
                     
                     # 뉴스 필터링 (키워드 기반)
@@ -1336,13 +1366,11 @@ def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
                                 # 충분한 기사 수집되면 중단
                                 if len(all_articles) >= 10:
                                     break
-                        except Exception as e:
+                except Exception as e:
                             logger.debug(f"뉴스 항목 파싱 실패: {e}")
-                            continue
-                    
-                    if len(all_articles) >= 10:
-                        break
-                        
+                    continue
+            
+                            
                 except Exception as e:
                     logger.warning(f"{ticker} 뉴스 수집 실패: {e}")
                     print(f"⚠️ {ticker} 뉴스 수집 실패: {e}")
@@ -1495,18 +1523,81 @@ def get_hankyung_consensus() -> str:
         return "[MARKET MATERIALS]\n[🇰🇷 Domestic (Source: Naver Finance Research)]\n데이터 수집 실패"
 
 
+def get_global_rss_news(max_items_per_source: int = 3) -> List[str]:
+    """
+    Bloomberg, CNBC 등 글로벌 RSS 피드에서 뉴스 헤드라인 수집
+    
+    Args:
+        max_items_per_source: 소스당 최대 수집할 뉴스 개수
+    
+    Returns:
+        뉴스 헤드라인 리스트 (형식: "[소스명] 헤드라인")
+    """
+    if feedparser is None:
+        logger.warning("feedparser가 설치되지 않음, RSS 피드 수집 불가")
+        return []
+    
+    news_list = []
+    
+    # 검증된 글로벌 뉴스 소스
+    rss_sources = {
+        "Bloomberg": "https://feeds.bloomberg.com/markets/news.rss",
+        "CNBC": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+        "Investing.com": "https://www.investing.com/rss/news.rss"
+    }
+    
+    for source, url in rss_sources.items():
+        try:
+            logger.info(f"{source} RSS 피드 수집 중: {url}")
+            
+            # curl_cffi 세션으로 RSS 피드 가져오기 (차단 우회)
+            response = _session.get(url, headers=HEADERS, timeout=15)
+            response.raise_for_status()
+            
+            # feedparser로 RSS 파싱
+            feed = feedparser.parse(response.content)
+            
+            if not feed.entries:
+                logger.debug(f"{source}: RSS 피드 항목 없음")
+                continue
+            
+            count = 0
+            for entry in feed.entries[:max_items_per_source]:
+                try:
+                    title = entry.get('title', '').strip()
+                    if title and len(title) >= 20:  # 20자 이상만 필터링
+                        news_list.append(f"[{source}] {title}")
+                        count += 1
+                except Exception as e:
+                    logger.debug(f"{source} 항목 파싱 실패: {e}")
+                    continue
+            
+            if count > 0:
+                logger.info(f"{source} RSS 수집 완료: {count}개")
+            else:
+                logger.debug(f"{source}: 유효한 헤드라인 없음")
+                
+        except Exception as e:
+            logger.warning(f"{source} RSS 수집 실패: {e}")
+            continue
+    
+    return news_list
+
+
 def get_google_news_rss() -> str:
     """
-    Yahoo Finance News 수집 (해외 시장 재료)
-    Google News RSS 대신 Yahoo Finance의 Stock Market News를 수집 (안정성 확보)
+    해외 시장 재료 수집 (Yahoo Finance + Bloomberg + CNBC RSS)
+    Yahoo Finance HTML 크롤링과 글로벌 RSS 피드를 통합하여 수집
     
     Returns:
         포맷팅된 해외 시장 재료 텍스트
     """
-    logger.info("=== Yahoo Finance News 수집 시작 ===")
-    print("=== Yahoo Finance News 수집 시작 ===")
+    logger.info("=== 해외 시장 재료 수집 시작 ===")
+    print("=== 해외 시장 재료 수집 시작 ===")
     
-    # Yahoo Finance Stock Market News 페이지
+    all_articles = []
+    
+    # 1. Yahoo Finance News 수집
     url = "https://finance.yahoo.com/topic/stock-market-news/"
     
     try:
@@ -1519,9 +1610,6 @@ def get_google_news_rss() -> str:
         soup = BeautifulSoup(response.content, 'html.parser')
         
         # 뉴스 헤드라인 추출: 모든 h3 태그에서 추출
-        articles = []
-        
-        # 모든 h3 태그에서 헤드라인 추출
         h3_tags = soup.find_all('h3')
         
         for h3 in h3_tags:
@@ -1536,37 +1624,50 @@ def get_google_news_rss() -> str:
                 # 20자 이상인 것만 필터링 (광고 제외)
                 if title and len(title) >= 20:
                     # 중복 제거
-                    if title not in articles:
-                        articles.append(title)
+                    if title not in all_articles:
+                        all_articles.append(f"[Yahoo Finance] {title}")
                         
-                        if len(articles) >= 5:  # 상위 5개
+                        if len(all_articles) >= 5:  # Yahoo Finance는 상위 5개
                             break
             except Exception as e:
                 logger.debug(f"Yahoo News 항목 파싱 실패: {e}")
                 continue
         
-        if articles:
-            result = "[🌎 Global (Source: Yahoo Finance News)]\n"
-            for i, article in enumerate(articles, 1):
-                result += f"{i}. {article}\n"
-            
-            logger.info(f"Yahoo Finance News 수집 완료: {len(articles)}개")
-            print(f"✅ Yahoo Finance News 수집 완료: {len(articles)}개")
-            return result
-        else:
-            result = "[🌎 Global (Source: Yahoo Finance News)]\n데이터 수집 실패"
-            logger.warning("Yahoo Finance News: 데이터 없음")
-            print("⚠️ Yahoo Finance News: 데이터 없음")
-            return result
-            
+        logger.info(f"Yahoo Finance News 수집 완료: {len([a for a in all_articles if '[Yahoo Finance]' in a])}개")
     except Exception as e:
-        logger.error(f"Yahoo Finance News 수집 실패: {e}")
-        print(f"❌ Yahoo Finance News 수집 실패: {e}")
-        return "[🌎 Global (Source: Yahoo Finance News)]\n데이터 수집 실패"
-    except Exception as e:
-        logger.error(f"Google News RSS 수집 실패: {e}")
-        print(f"❌ Google News RSS 수집 실패: {e}")
-        return "[🌎 Global (Source: Google News US)]\n데이터 수집 실패"
+        logger.warning(f"Yahoo Finance News 수집 실패: {e}")
+    
+    # 2. 글로벌 RSS 피드 수집 (Bloomberg, CNBC)
+    rss_news = get_global_rss_news(max_items_per_source=3)
+    if rss_news:
+        all_articles.extend(rss_news)
+        logger.info(f"글로벌 RSS 수집 완료: {len(rss_news)}개")
+    
+    # 중복 제거 및 정렬
+    unique_articles = []
+    seen_titles = set()
+    for article in all_articles:
+        # 소스명 제거한 제목으로 중복 체크
+        title_only = article.split('] ', 1)[-1] if '] ' in article else article
+        title_lower = title_only.lower().strip()
+        
+        if title_lower not in seen_titles:
+            seen_titles.add(title_lower)
+            unique_articles.append(article)
+    
+    if unique_articles:
+        result = "[🌎 해외 재료 (Sources: Yahoo Finance, Bloomberg, CNBC, Reuters)]\n"
+        for i, article in enumerate(unique_articles, 1):
+            result += f"{i}. {article}\n"
+        
+        logger.info(f"해외 시장 재료 수집 완료: {len(unique_articles)}개")
+        print(f"✅ 해외 시장 재료 수집 완료: {len(unique_articles)}개")
+        return result
+    else:
+        result = "[🌎 해외 재료 (Sources: Yahoo Finance, Bloomberg, CNBC, Reuters)]\n데이터 수집 실패"
+        logger.warning("해외 시장 재료: 데이터 없음")
+        print("⚠️ 해외 시장 재료: 데이터 없음")
+        return result
 
 
 def get_market_headlines(max_items: int = 10) -> str:
@@ -1664,9 +1765,9 @@ def translate_headlines(headlines_text: str, ai_researcher=None) -> str:
             _, title = headline_info
             
             # 원문 그대로 표시 (번역 없음)
-            formatted_lines.append(f"<b>{number}. {title}</b>")
-            if number in summary_map:
-                formatted_lines.append(f"   요약: {summary_map[number]}")
+                formatted_lines.append(f"<b>{number}. {title}</b>")
+                if number in summary_map:
+                    formatted_lines.append(f"   요약: {summary_map[number]}")
             formatted_lines.append("")  # 빈 줄
         
         result = "\n".join(formatted_lines)

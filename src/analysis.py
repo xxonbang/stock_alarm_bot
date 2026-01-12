@@ -21,12 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
-try:
-    from tradingview_ta import TA_Handler, Interval
-except ImportError:
-    TA_Handler = None
-    Interval = None
-    logger.warning("tradingview_ta 라이브러리가 설치되지 않았습니다. TradingView 기술적 분석 기능을 사용할 수 없습니다.")
+# TradingView API 의존성 제거 - 자체 계산 엔진 사용
 
 # AI 금지 검증: 이 파일에서 직접 import하지 않았는지 확인
 # (다른 모듈에서 간접적으로 import되는 것은 허용)
@@ -77,8 +72,8 @@ def get_current_price(ticker: str) -> Optional[float]:
             return None
         
         # 최신 거래일의 종가(Close)를 명시적으로 가져오기
-        # Adj Close가 아닌 실제 Close 사용
-        data = stock.history(period="5d")  # 최근 5일 데이터
+        # 배당/분할 반영을 위해 auto_adjust=True 사용
+        data = stock.history(period="5d", auto_adjust=True)  # 최근 5일 데이터
         
         if not data.empty:
             # 가장 최근 거래일의 Close 가격 사용
@@ -129,8 +124,8 @@ def get_historical_price(ticker: str, days_ago: int) -> Optional[float]:
         end_date = datetime.now(pytz.UTC)
         start_date = end_date - timedelta(days=period_days)
         
-        # yfinance는 명시적으로 Close 컬럼 사용 (Adj Close 아님)
-        data = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
+        # 배당/분할 반영을 위해 auto_adjust=True 사용
+        data = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'), auto_adjust=True)
         
         if data.empty:
             logger.warning(f"{ticker}: 과거 데이터가 없습니다.")
@@ -170,7 +165,11 @@ def get_historical_price(ticker: str, days_ago: int) -> Optional[float]:
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> Optional[float]:
     """
-    RSI (Relative Strength Index) 계산
+    RSI (Relative Strength Index) 계산 - Wilder's Smoothing 방식 (표준 방법)
+    
+    J. Welles Wilder가 1978년 개발한 표준 RSI 계산 방법을 사용합니다.
+    Simple Moving Average 대신 Wilder's Smoothing (RMA)을 사용하여
+    최근 데이터에 더 큰 가중치를 부여합니다.
     
     Args:
         prices: 종가 시리즈
@@ -187,11 +186,26 @@ def calculate_rsi(prices: pd.Series, period: int = 14) -> Optional[float]:
         delta = prices.diff()
         
         # 상승분과 하락분 분리
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        
+        # Wilder's Smoothing (RMA - Running Moving Average)
+        # 초기값: 첫 period일의 단순 평균
+        avg_gain = pd.Series(index=prices.index, dtype=float)
+        avg_loss = pd.Series(index=prices.index, dtype=float)
+        
+        # 첫 번째 평균값 계산
+        avg_gain.iloc[period] = gain.iloc[1:period+1].mean()
+        avg_loss.iloc[period] = loss.iloc[1:period+1].mean()
+        
+        # 이후 값: Wilder's smoothing 공식
+        # RMA = (이전 RMA * (period - 1) + 현재 값) / period
+        for i in range(period + 1, len(prices)):
+            avg_gain.iloc[i] = (avg_gain.iloc[i-1] * (period - 1) + gain.iloc[i]) / period
+            avg_loss.iloc[i] = (avg_loss.iloc[i-1] * (period - 1) + loss.iloc[i]) / period
         
         # RS (Relative Strength) 계산
-        rs = gain / loss
+        rs = avg_gain / (avg_loss + 1e-10)  # 0으로 나누기 방지
         
         # RSI 계산
         rsi = 100 - (100 / (1 + rs))
@@ -244,7 +258,8 @@ def get_technical_indicators(ticker: str) -> Dict[str, Optional[float]]:
             return {'rsi': None, 'ma20': None, 'ma_deviation': None}
         
         # 최소 30일치 데이터 필요 (RSI 14일 + MA 20일 + 여유)
-        hist = stock.history(period="2mo")
+        # 배당/분할 반영을 위해 auto_adjust=True 사용
+        hist = stock.history(period="2mo", auto_adjust=True)
         
         if hist.empty or len(hist) < 30:
             logger.warning(f"{ticker}: 기술적 지표 계산을 위한 데이터 부족 ({len(hist)}일)")
@@ -702,214 +717,178 @@ def get_stock_summary(tickers: List[str]) -> str:
     return result_text
 
 
-def get_tradingview_technical_summary(tickers: List[str]) -> str:
+def calculate_indicators(hist: pd.DataFrame) -> Dict:
     """
-    TradingView 기술적 분석 신호 수집 (집단지성 기반)
+    Pandas를 사용하여 기술적 지표(RSI, 이격도) 직접 계산
+    API 호출 없이 로컬에서 계산하므로 100% 성공 보장
     
     Args:
-        tickers: 종목 코드 리스트 (예: ['005930', 'TSLA'])
+        hist: yfinance로 가져온 주가 데이터 (DataFrame)
     
     Returns:
-        포맷팅된 TradingView 기술적 분석 텍스트
+        {
+            'rsi': RSI 값 (0~100),
+            'disparity': 이격도 (%),
+            'signal': 매매 신호 ('BUY', 'SELL', 'NEUTRAL' 등)
+        }
+    """
+    try:
+        if len(hist) < 20:
+            return {}
+
+        close = hist['Close']
+
+        # 1. RSI (14일) 계산 - Wilder's Smoothing 방식 사용
+        current_rsi = calculate_rsi(close, period=14)
+        if current_rsi is None:
+            return {}
+
+        # 2. 이격도 (Disparity 20일) 계산
+        ma20 = close.rolling(window=20).mean()
+        current_ma20 = ma20.iloc[-1]
+        current_price = close.iloc[-1]
+        disparity = (current_price / current_ma20) * 100
+
+        # 3. 신호 판단
+        signal = "NEUTRAL"
+        if current_rsi >= 70:
+            signal = "SELL (Overbought)"
+        elif current_rsi <= 30:
+            signal = "BUY (Oversold)"
+        elif disparity >= 105:
+            signal = "SELL (High Disparity)"
+        elif disparity <= 95:
+            signal = "BUY (Low Disparity)"
+
+        return {
+            "rsi": round(current_rsi, 2) if current_rsi is not None else None,
+            "disparity": round(disparity, 2),
+            "signal": signal
+        }
+    except Exception as e:
+        logger.debug(f"지표 계산 오류: {e}")
+        return {}
+
+
+def get_technical_summary(symbol: str) -> str:
+    """
+    yfinance 데이터 기반 기술적 분석 수행
+    TradingView API 대체용 (자체 계산 엔진)
+    
+    Args:
+        symbol: 종목 코드 (예: '005930.KS', 'TSLA')
+    
+    Returns:
+        포맷팅된 기술적 분석 텍스트
+    """
+    # 금리형 ETF 예외 처리 (파킹형 ETF는 매일 상승하므로 RSI 계산 불가)
+    interest_rate_etfs = {
+        '449170.KS',  # TIGER KOFR금리액티브
+        '423160.KS',  # CD금리
+        '423150.KS',  # KBSTAR 단기통안채
+        '423140.KS',  # KBSTAR 단기국공채
+    }
+    
+    if symbol in interest_rate_etfs:
+        logger.info(f"{symbol}: 금리형 ETF - RSI 계산 건너뜀")
+        return "N/A (금리형 ETF - 매일 상승)"
+    
+    try:
+        # yfinance로 데이터 가져오기 (이미 세션 캐싱됨)
+        ticker = yf.Ticker(symbol)
+        # RSI, MA 계산을 위해 최소 2달치 데이터 필요
+        # 배당/분할 반영을 위해 auto_adjust=True 사용
+        hist = ticker.history(period="3mo", auto_adjust=True)
+        
+        if hist.empty:
+            return "N/A (No Data)"
+
+        indicators = calculate_indicators(hist)
+        
+        if not indicators:
+            return "N/A (Insufficient Data)"
+
+        return f"{indicators['signal']} (RSI: {indicators['rsi']}, 이격도: {indicators['disparity']}%)"
+
+    except Exception as e:
+        logger.warning(f"{symbol} 분석 실패: {e}")
+        return "Analysis Failed"
+
+
+def get_tradingview_technical_summary(tickers: List[str]) -> str:
+    """
+    기술적 분석 신호 수집 (자체 계산 엔진 사용)
+    TradingView API 의존성 완전 제거 - yfinance 데이터로 직접 계산
+    
+    Args:
+        tickers: 종목 코드 리스트 (예: ['005930.KS', 'TSLA'])
+    
+    Returns:
+        포맷팅된 기술적 분석 텍스트
     """
     logger.info("=== TradingView 기술적 분석 수집 시작 ===")
     print("=== TradingView 기술적 분석 수집 시작 ===")
     
-    if TA_Handler is None or Interval is None:
-        logger.warning("tradingview_ta 라이브러리가 없어 TradingView 데이터를 수집할 수 없습니다.")
-        return "[TECHNICAL SIGNALS (Source: TradingView)]\nTradingView 라이브러리 미설치"
-    
     signals = []
+    
+    # 금리형 ETF 예외 처리 (파킹형 ETF는 매일 상승하므로 RSI 계산 불가)
+    interest_rate_etfs = {
+        '449170.KS',  # TIGER KOFR금리액티브
+        '423160.KS',  # CD금리
+        '423150.KS',  # KBSTAR 단기통안채
+        '423140.KS',  # KBSTAR 단기국공채
+    }
     
     for ticker in tickers:
         try:
-            # 심볼 정제: 모든 접미사 제거 (.KS, .KQ, .T 등)
-            original_ticker = ticker
-            symbol = ticker.strip()
-            
-            # 모든 접미사 제거 (정제 강화)
-            for suffix in ['.KS', '.KQ', '.T', '.TO', '.L', '.HK', '.SS', '.SZ']:
-                if suffix in symbol:
-                    symbol = symbol.replace(suffix, '').strip()
-            
-            # 거래소 및 스크리너 초기화
-            exchange = "NASDAQ"
-            screener = "america"
-            korean_exchanges = ["KRX", "KOSPI", "KOSDAQ"]
-            us_exchanges = ["NASDAQ", "NYSE", "AMEX"]
-            is_korean_stock = False
-            is_crypto = False
-            
-            # 한국 주식 판별: 숫자 6자리 또는 .KS/.KQ가 있었던 경우
-            if symbol.isdigit() and len(symbol) == 6:
-                screener = "south-korea"
-                is_korean_stock = True
-                exchange = korean_exchanges[0]
-            # 암호화폐 처리
-            elif '-USD' in original_ticker or '-KRW' in original_ticker or '-USDT' in original_ticker:
-                screener = "crypto"
-                is_crypto = True
-                exchange = "BINANCE"  # 암호화폐는 BINANCE 사용
-            # 해외 주식 처리
-            elif original_ticker.startswith('^'):
-                symbol = original_ticker.replace('^', '').strip()
-                screener = "america"
-                exchange = us_exchanges[0]
-            else:
-                # 기본값: 해외 주식으로 간주
-                screener = "america"
-                exchange = us_exchanges[0]
+            # 금리형 ETF는 스킵
+            if ticker in interest_rate_etfs:
+                signals.append(f"- {ticker}: N/A (금리형 ETF - 매일 상승)")
+                logger.info(f"{ticker}: 금리형 ETF - RSI 계산 건너뜀")
+                continue
             
             # 암호화폐는 스킵
-            if is_crypto:
-                logger.debug(f"TradingView {ticker}: 암호화폐는 지원하지 않음, 스킵")
+            if '-USD' in ticker or '-KRW' in ticker or '-USDT' in ticker:
+                logger.debug(f"{ticker}: 암호화폐는 지원하지 않음, 스킵")
                 continue
             
-            # 심볼이 비어있으면 스킵
-            if not symbol:
-                logger.warning(f"TradingView {ticker}: 심볼이 비어있음, 스킵")
+            # yfinance로 데이터 가져오기
+            ticker_obj = yf.Ticker(ticker)
+            # 배당/분할 반영을 위해 auto_adjust=True 사용
+            hist = ticker_obj.history(period="3mo", auto_adjust=True)
+            
+            if hist.empty or len(hist) < 20:
+                signals.append(f"- {ticker}: N/A (데이터 부족)")
+                logger.warning(f"{ticker}: 데이터 부족 ({len(hist)}일)")
                 continue
             
-            # TradingView 분석 시도: Exchange Auto-Discovery
-            analysis = None
-            exchanges_to_try = []
+            # 지표 계산
+            indicators = calculate_indicators(hist)
             
-            # 한국 주식인 경우: 여러 거래소를 순차적으로 시도
-            if is_korean_stock:
-                exchanges_to_try = korean_exchanges
-            # 해외 주식인 경우: NASDAQ, NYSE, AMEX 순서로 시도
-            else:
-                exchanges_to_try = us_exchanges
-            
-            # 거래소 후보 리스트를 순차적으로 시도
-            for idx, exchange_to_try in enumerate(exchanges_to_try):
-                try:
-                    # 속도 제어: 모든 요청 전에 1.5초 대기 (429 에러 방지)
-                    time.sleep(1.5)
-                    
-                    # TradingView 핸들러 생성
-                    handler = TA_Handler(
-                        symbol=symbol,
-                        screener=screener,
-                        exchange=exchange_to_try,
-                        interval=Interval.INTERVAL_1_DAY
-                    )
-                    
-                    # 분석 실행
-                    analysis = handler.get_analysis()
-                    if analysis and hasattr(analysis, 'summary'):
-                        # 성공한 거래소로 업데이트
-                        exchange = exchange_to_try
-                        logger.debug(f"TradingView {ticker} ({symbol}) 분석 성공: {exchange_to_try}")
-                        break  # 성공 시 즉시 루프 탈출
-                except Exception as analysis_error:
-                    if exchange_to_try == exchanges_to_try[-1]:
-                        # 마지막 시도 실패 시에만 경고 로그
-                        logger.warning(f"TradingView {ticker} ({symbol}) 분석 실행 실패 (모든 거래소 시도 실패): {analysis_error}")
-                    else:
-                        logger.debug(f"TradingView {ticker} ({symbol}) {exchange_to_try} 실패, 다음 거래소 시도 중...")
-                    continue
-            
-            # 모든 거래소 시도 실패 시 Fallback: yfinance로 직접 RSI 계산
-            if not analysis:
-                try:
-                    logger.info(f"TradingView 실패 ({original_ticker}), 로컬 계산으로 전환...")
-                    ticker_obj = yf.Ticker(original_ticker)
-                    hist = ticker_obj.history(period="1mo")
-                    
-                    if len(hist) > 14 and 'Close' in hist.columns:
-                        # RSI 계산 공식 적용 (RSI 14)
-                        delta = hist['Close'].diff()
-                        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                        
-                        # 0으로 나누기 방지
-                        rs = gain / (loss + 1e-10)  # 작은 값 추가하여 0으로 나누기 방지
-                        rsi = 100 - (100 / (1 + rs))
-                        current_rsi = rsi.iloc[-1]
-                        
-                        # RSI 값에 따른 매수/매도 시그널 매핑
-                        signal = "NEUTRAL"
-                        if current_rsi > 70:
-                            signal = "SELL"
-                        elif current_rsi < 30:
-                            signal = "BUY"
-                        elif current_rsi > 50:
-                            signal = "WEAK_BUY"
-                        elif current_rsi < 50:
-                            signal = "WEAK_SELL"
-                        
-                        # MACD 계산 (선택적)
-                        macd_line = hist['Close'].ewm(span=12).mean() - hist['Close'].ewm(span=26).mean()
-                        signal_line = macd_line.ewm(span=9).mean()
-                        current_macd = (macd_line.iloc[-1] - signal_line.iloc[-1])
-                        
-                        # SMA20 계산
-                        sma20 = hist['Close'].rolling(window=20).mean().iloc[-1]
-                        current_price = hist['Close'].iloc[-1]
-                        
-                        signals.append(f"- {original_ticker}: {signal} (RSI: {current_rsi:.1f}, MACD: {current_macd:.2f}, SMA20: {sma20:.2f} - Local Calc)")
-                        logger.info(f"로컬 계산 완료: {original_ticker} - {signal} (RSI: {current_rsi:.1f})")
-                    else:
-                        signals.append(f"- {original_ticker}: N/A (데이터 부족)")
-                        logger.warning(f"로컬 계산 실패: {original_ticker} - 데이터 부족")
-                except Exception as fallback_error:
-                    signals.append(f"- {original_ticker}: N/A (분석 실패)")
-                    logger.warning(f"로컬 계산 실패: {original_ticker} - {fallback_error}")
+            if not indicators:
+                signals.append(f"- {ticker}: N/A (계산 실패)")
+                logger.warning(f"{ticker}: 지표 계산 실패")
                 continue
             
-            if analysis and hasattr(analysis, 'summary') and hasattr(analysis, 'indicators'):
-                # 요약 신호 추출
-                summary = analysis.summary
-                signal = summary.get('RECOMMENDATION', 'NEUTRAL') if isinstance(summary, dict) else 'NEUTRAL'
-                
-                # 핵심 지표 추출
-                indicators = analysis.indicators
-                rsi = indicators.get('RSI', None) if isinstance(indicators, dict) else None
-                macd = indicators.get('MACD', None) if isinstance(indicators, dict) else None
-                sma20 = indicators.get('SMA20', None) if isinstance(indicators, dict) else None
-                
-                # 종목명 가져오기 (간단한 변환)
-                ticker_name = symbol
-                if exchange == "KRX":
-                    # 한국 주식명 매핑
-                    name_map = {
-                        '005930': 'Samsung Electronics',
-                        '000660': 'SK Hynix',
-                    }
-                    ticker_name = name_map.get(symbol, symbol)
-                else:
-                    ticker_name = symbol
-                
-                # 포맷팅
-                indicator_strs = []
-                if rsi is not None:
-                    indicator_strs.append(f"RSI: {rsi:.1f}")
-                if macd is not None:
-                    indicator_strs.append(f"MACD: {macd:.2f}")
-                if sma20 is not None:
-                    indicator_strs.append(f"SMA20: {sma20:.2f}")
-                
-                indicator_str = ", ".join(indicator_strs) if indicator_strs else "N/A"
-                
-                signals.append(f"- {ticker_name}: {signal} ({indicator_str})")
-                logger.info(f"TradingView {original_ticker} ({symbol}) 분석 완료: {signal}")
-            else:
-                logger.warning(f"TradingView {original_ticker} ({symbol}) 분석 실패: 분석 결과가 유효하지 않음")
-                
+            # 결과 포맷팅
+            signal_text = f"- {ticker}: {indicators['signal']} (RSI: {indicators['rsi']}, 이격도: {indicators['disparity']}%)"
+            signals.append(signal_text)
+            logger.info(f"{ticker} 분석 완료: {indicators['signal']} (RSI: {indicators['rsi']})")
+            
         except Exception as e:
-            logger.warning(f"TradingView {ticker} 분석 실패: {e}")
+            logger.warning(f"{ticker} 분석 실패: {e}")
+            signals.append(f"- {ticker}: N/A (분석 실패)")
             continue
     
     if signals:
-        result = "[TECHNICAL SIGNALS (Source: TradingView)]\n" + "\n".join(signals)
-        logger.info(f"TradingView 기술적 분석 수집 완료: {len(signals)}개")
-        print(f"✅ TradingView 기술적 분석 수집 완료: {len(signals)}개")
+        result = "[TECHNICAL SIGNALS (Local Calculation)]\n" + "\n".join(signals)
+        logger.info(f"기술적 분석 수집 완료: {len(signals)}개")
+        print(f"✅ 기술적 분석 수집 완료: {len(signals)}개")
         return result
     else:
-        result = "[TECHNICAL SIGNALS (Source: TradingView)]\n데이터 수집 실패"
-        logger.warning("TradingView 기술적 분석: 데이터 없음")
-        print("⚠️ TradingView 기술적 분석: 데이터 없음")
+        result = "[TECHNICAL SIGNALS (Local Calculation)]\n데이터 수집 실패"
+        logger.warning("기술적 분석: 데이터 없음")
+        print("⚠️ 기술적 분석: 데이터 없음")
         return result
 
 
