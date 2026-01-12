@@ -15,7 +15,7 @@ try:
 except ImportError:
     # curl_cffi가 없으면 일반 requests 사용 (fallback)
     try:
-import requests
+        import requests
     except ImportError:
         requests = None
     CURL_CFFI_AVAILABLE = False
@@ -331,7 +331,7 @@ def filter_relevant_news(news_items: List[Dict], max_items: int = 7) -> List[Dic
         for keyword in market_keywords:
             if keyword.lower() in combined_text:
                 score += 2
-                    matched_keywords.append(keyword)
+                matched_keywords.append(keyword)
                 break  # 첫 매칭만 카운트
         
         # 최소 점수 이상만 포함
@@ -648,13 +648,13 @@ def get_fear_greed_index(vix_value: Optional[float] = None) -> Optional[str]:
                 elif score <= 75:
                     classification = "Greed"
                     emoji = "😊"
-            else:
+                else:
                     classification = "Extreme Greed"
                     emoji = "🚀"
-            
+                
                 result = f"- 공포/탐욕 지수: {int(score)} ({classification}) {emoji} (CNN 공식)"
                 logger.info(f"✅ CNN API에서 공포/탐욕 지수 획득 성공: {int(score)} ({classification})")
-            return result
+                return result
     except Exception as e:
         logger.warning(f"CNN API 호출 실패, 자체 계산으로 Fallback: {e}")
     
@@ -775,7 +775,7 @@ def get_fear_greed_index(vix_value: Optional[float] = None) -> Optional[str]:
         result = f"- 공포/탐욕 지수: {int(calculated_value)} ({classification}) {emoji} (자체 계산: {calc_detail})"
         rsi_str = f"{market_rsi:.1f}" if market_rsi is not None else "N/A"
         logger.info(f"공포/탐욕 지수 자체 계산 완료: {int(calculated_value)} ({classification}) - VIX: {vix_value:.2f}, RSI: {rsi_str}")
-            return result
+        return result
     except Exception as e:
         logger.error(f"공포/탐욕 지수 계산 실패: {e}")
     return None
@@ -1092,7 +1092,7 @@ def get_us_top_movers(max_items: int = 10) -> str:
                             price_text = td_text
                             break
                         except ValueError:
-                        continue
+                            continue
                 # 필터링: 나스닥 100 또는 S&P 500 구성 종목만 (잡주 제외)
                 # 시가총액이 큰 종목만 필터링하기 위해 가격이 $5 이상인 종목만
                 if ticker and name and change_pct_text:
@@ -1273,7 +1273,7 @@ def get_korea_hot_themes(max_themes: int = 3) -> str:
         else:
             return "**🚀 오늘의 강세 테마:**\n뚜렷한 강세 테마 없음"
             
-                                except Exception as e:
+    except Exception as e:
         logger.error(f"테마 수집 실패: {e}")
         return "**🚀 오늘의 강세 테마:**\n수집 실패"
 
@@ -1326,7 +1326,7 @@ def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
                     
                     if not news_list:
                         logger.debug(f"{ticker}: 뉴스 없음")
-                                    continue
+                        continue
                             
                     logger.info(f"{ticker}: {len(news_list)}개 뉴스 발견")
                     
@@ -1366,10 +1366,12 @@ def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
                                 # 충분한 기사 수집되면 중단
                                 if len(all_articles) >= 10:
                                     break
-                except Exception as e:
+                        except Exception as e:
                             logger.debug(f"뉴스 항목 파싱 실패: {e}")
-                    continue
+                            continue
             
+                        if len(all_articles) >= 10:
+                            break
                             
                 except Exception as e:
                     logger.warning(f"{ticker} 뉴스 수집 실패: {e}")
@@ -1765,9 +1767,9 @@ def translate_headlines(headlines_text: str, ai_researcher=None) -> str:
             _, title = headline_info
             
             # 원문 그대로 표시 (번역 없음)
-                formatted_lines.append(f"<b>{number}. {title}</b>")
-                if number in summary_map:
-                    formatted_lines.append(f"   요약: {summary_map[number]}")
+            formatted_lines.append(f"<b>{number}. {title}</b>")
+            if number in summary_map:
+                formatted_lines.append(f"   요약: {summary_map[number]}")
             formatted_lines.append("")  # 빈 줄
         
         result = "\n".join(formatted_lines)
