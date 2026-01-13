@@ -238,6 +238,61 @@ def calculate_ma_deviation(current_price: float, ma20: Optional[float]) -> Optio
         return None
 
 
+def calculate_advanced_indicators(ticker: str, hist_data: Optional[pd.DataFrame] = None) -> Dict[str, Optional[float]]:
+    """
+    고급 기술적 지표 계산 (20일 이격도, 52주 신고가 위치)
+    
+    Args:
+        ticker: 주식 티커 심볼
+        hist_data: 주가 데이터 (None이면 자동 조회)
+    
+    Returns:
+        {
+            'ma_disparity': 20일 이격도 (이평선 대비 %),
+            'year_high_pos': 52주 신고가 대비 위치 (%)
+        }
+    """
+    result = {
+        'ma_disparity': None,
+        'year_high_pos': None
+    }
+    
+    try:
+        if hist_data is None:
+            stock = get_stock_data(ticker)
+            if stock is None:
+                return result
+            # 52주 신고가를 위해 1년치 데이터 필요
+            hist_data = stock.history(period="1y", auto_adjust=True)
+        
+        if hist_data.empty or len(hist_data) < 20:
+            logger.warning(f"{ticker}: 고급 지표 계산을 위한 데이터 부족 ({len(hist_data)}일)")
+            return result
+        
+        closes = hist_data['Close']
+        current_price = float(closes.iloc[-1])
+        
+        # 1. 20일 이격도 계산 (MA Disparity)
+        if len(closes) >= 20:
+            ma20 = float(closes.rolling(window=20).mean().iloc[-1])
+            ma_disparity = (current_price / ma20) * 100 if ma20 > 0 else None
+            result['ma_disparity'] = round(ma_disparity, 2) if ma_disparity else None
+        
+        # 2. 52주 신고가 위치 계산 (Year High Position)
+        # history(period='1y')['High'].max() 사용 (더 정확)
+        highs = hist_data['High']
+        if len(highs) > 0:
+            year_high = float(highs.max())
+            year_high_pos = (current_price / year_high) * 100 if year_high > 0 else None
+            result['year_high_pos'] = round(year_high_pos, 2) if year_high_pos else None
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"{ticker} 고급 기술적 지표 계산 실패: {e}")
+        return result
+
+
 def get_technical_indicators(ticker: str) -> Dict[str, Optional[float]]:
     """
     기술적 지표 계산 (RSI, 20일 이동평균선, 괴리율)
@@ -278,19 +333,24 @@ def get_technical_indicators(ticker: str) -> Dict[str, Optional[float]]:
         # 괴리율 계산
         ma_deviation = calculate_ma_deviation(current_price, ma20)
         
+        # 고급 지표 추가
+        advanced = calculate_advanced_indicators(ticker, hist)
+        
         return {
             'rsi': rsi,
             'ma20': ma20,
-            'ma_deviation': ma_deviation
+            'ma_deviation': ma_deviation,
+            'ma_disparity': advanced.get('ma_disparity'),
+            'year_high_pos': advanced.get('year_high_pos')
         }
     except Exception as e:
         logger.error(f"{ticker} 기술적 지표 계산 실패: {e}")
-        return {'rsi': None, 'ma20': None, 'ma_deviation': None}
+        return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None}
 
 
 def calculate_returns(ticker: str) -> Dict:
     """
-    기간별 수익률 및 기술적 지표를 계산
+    기간별 수익률 및 기술적 지표를 계산 (수급 데이터, ETF 괴리율 포함)
     
     Args:
         ticker: 주식 티커 심볼
@@ -307,15 +367,26 @@ def calculate_returns(ticker: str) -> Dict:
             'technical': {
                 'rsi': RSI 값,
                 'ma20': 20일 이동평균선,
-                'ma_deviation': 20일 이동평균선 괴리율 (%)
-            }
+                'ma_deviation': 20일 이동평균선 괴리율 (%),
+                'ma_disparity': 20일 이격도 (%),
+                'year_high_pos': 52주 신고가 대비 위치 (%)
+            },
+            'supply_demand': {
+                'foreign': 외국인 순매매량 (만 주),
+                'institutional': 기관 순매매량 (만 주)
+            },
+            'disparity_rate': ETF 괴리율 (NAV 대비 %, ETF가 아닐 경우 None),
+            'institutional_held': 기관 보유 비중 (%, 해외 주식만)
         }
     """
     result = {
         'ticker': ticker,
         'current_price': None,
         'returns': {},
-        'technical': {}
+        'technical': {},
+        'supply_demand': {'foreign': None, 'institutional': None},
+        'disparity_rate': None,
+        'institutional_held': None
     }
     
     # 현재가 조회
@@ -353,6 +424,27 @@ def calculate_returns(ticker: str) -> Dict:
     # 기술적 지표 계산
     technical = get_technical_indicators(ticker)
     result['technical'] = technical
+    
+    # 국내 주식인 경우 수급 데이터 및 ETF 괴리율 수집
+    if '.KS' in ticker or '.KQ' in ticker:
+        try:
+            from src.crawler import get_kr_stock_data
+            kr_data = get_kr_stock_data(ticker)
+            if kr_data:
+                result['supply_demand']['foreign'] = kr_data.get('foreign_net')
+                result['supply_demand']['institutional'] = kr_data.get('institutional_net')
+                result['disparity_rate'] = kr_data.get('disparity_rate')
+        except Exception as e:
+            logger.debug(f"{ticker} 국내 주식 데이터 수집 실패: {e}")
+    
+    # 해외 주식인 경우 기관 보유 비중 수집
+    else:
+        try:
+            from src.crawler import get_global_institutional_data
+            institutional_held = get_global_institutional_data(ticker)
+            result['institutional_held'] = institutional_held
+        except Exception as e:
+            logger.debug(f"{ticker} 기관 보유 비중 수집 실패: {e}")
     
     return result
 
@@ -575,6 +667,8 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 technical_parts = []
                 rsi = technical.get('rsi')
                 ma_deviation = technical.get('ma_deviation')
+                ma_disparity = technical.get('ma_disparity')
+                year_high_pos = technical.get('year_high_pos')
                 
                 if rsi is not None:
                     rsi_status = ""
@@ -592,13 +686,47 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                         ma_status = " [침체]"
                     technical_parts.append(f"20일 이격도: {ma_deviation:.1f}%{ma_status}")
                 
+                if ma_disparity is not None:
+                    technical_parts.append(f"MA 이격도: {ma_disparity:.1f}%")
+                
+                if year_high_pos is not None:
+                    technical_parts.append(f"52주 위치: {year_high_pos:.1f}%")
+                
                 if technical_parts:
                     technical_str = " | ".join(technical_parts)
                 else:
                     technical_str = "N/A"
                 
-                # 종목명과 티커명 강조 효과 (기술적 지표 포함)
+                # 수급 데이터 및 ETF 괴리율 포맷팅
+                additional_info = []
+                supply_demand = result.get('supply_demand', {})
+                foreign_net = supply_demand.get('foreign')
+                institutional_net = supply_demand.get('institutional')
+                
+                if foreign_net is not None or institutional_net is not None:
+                    supply_str = "수급: "
+                    supply_parts = []
+                    if foreign_net is not None:
+                        sign = "+" if foreign_net >= 0 else ""
+                        supply_parts.append(f"외인 {sign}{foreign_net:.2f}만주")
+                    if institutional_net is not None:
+                        sign = "+" if institutional_net >= 0 else ""
+                        supply_parts.append(f"기관 {sign}{institutional_net:.2f}만주")
+                    if supply_parts:
+                        additional_info.append(supply_str + " / ".join(supply_parts))
+                
+                disparity_rate = result.get('disparity_rate')
+                if disparity_rate is not None:
+                    additional_info.append(f"ETF 괴리율: {disparity_rate:.2f}%")
+                
+                institutional_held = result.get('institutional_held')
+                if institutional_held is not None:
+                    additional_info.append(f"기관 보유: {institutional_held:.2f}%")
+                
+                # 종목명과 티커명 강조 효과 (기술적 지표 및 추가 정보 포함)
                 summary_line = f"📊 <b>{ticker_name}</b> <code>({ticker})</code>\n   현재가: <b>{price_str}</b>\n   변동률:{returns_str}\n   기술적 지표: {technical_str}"
+                if additional_info:
+                    summary_line += f"\n   추가 정보: {' | '.join(additional_info)}"
                 summary_parts.append(summary_line)
             
             # 카테고리별 메시지 생성

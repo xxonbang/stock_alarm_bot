@@ -1726,17 +1726,15 @@ def is_korean_text(text: str) -> bool:
 
 def translate_headlines(headlines_text: str, ai_researcher=None) -> str:
     """
-    뉴스 헤드라인 포맷팅 (API 호출 제거 - Batch Processing 구조)
-    번역 없이 원문 그대로 사용하여 API 호출을 단 1회로 제한
-    
-    [중요] 이 함수는 AI를 사용하지 않습니다. 순수 Python 문자열 처리만 수행합니다.
+    뉴스 헤드라인 포맷팅 및 영어 뉴스 한국어 번역
+    영어 뉴스의 경우 한국어 번역을 하단에 추가
     
     Args:
         headlines_text: 원문 헤드라인 텍스트
-        ai_researcher: 사용하지 않음 (호환성을 위해 유지, 무시됨)
+        ai_researcher: AIResearcher 인스턴스 (번역용, None이면 번역 스킵)
     
     Returns:
-        포맷팅된 뉴스 텍스트 (원문 그대로, 번역 없음)
+        포맷팅된 뉴스 텍스트 (영어 뉴스는 한국어 번역 포함)
     """
     if "뉴스 데이터 수집 불가" in headlines_text:
         return headlines_text
@@ -1789,21 +1787,373 @@ def translate_headlines(headlines_text: str, ai_researcher=None) -> str:
         # 모든 헤드라인을 번호 순서대로 출력
         all_numbers = sorted(set([num for num, _ in headlines_data]), key=int)
         
+        # 배치 번역: 모든 영어 뉴스를 한 번에 번역 (API 호출 1회로 최적화)
+        translation_map = {}  # number -> {'title': 번역된 제목, 'summary': 번역된 요약}
+        
+        if ai_researcher is not None:
+            # 번역이 필요한 뉴스 수집
+            items_to_translate = []
+            for number in all_numbers:
+                headline_info = next((num, title) for num, title in headlines_data if num == number)
+                _, title = headline_info
+                
+                if not is_korean_text(title):
+                    summary = summary_map.get(number, "")
+                    items_to_translate.append({
+                        'number': number,
+                        'title': title,
+                        'summary': summary if summary and not is_korean_text(summary) and len(summary) > 20 else None
+                    })
+            
+            # 번역이 필요한 항목이 있으면 한 번에 번역
+            if items_to_translate:
+                try:
+                    # 배치 번역 프롬프트 생성
+                    translate_items = []
+                    for item in items_to_translate:
+                        translate_items.append(f"{item['number']}. {item['title']}")
+                        if item['summary']:
+                            translate_items.append(f"   요약: {item['summary'][:200]}")
+                    
+                    batch_prompt = f"""다음 영어 뉴스 제목과 요약을 자연스러운 한국어로 번역해주세요.
+각 번호에 대해 번역만 출력하고, 다른 설명은 추가하지 마세요.
+형식은 다음과 같이 유지하세요:
+1. [번역된 제목]
+   요약: [번역된 요약] (요약이 있는 경우만)
+
+{chr(10).join(translate_items)}"""
+                    
+                    logger.info(f"배치 번역 시작: {len(items_to_translate)}개 뉴스 (API 호출 1회)")
+                    translated_text, _ = ai_researcher._call_ai(batch_prompt, max_retries=2)
+                    
+                    if translated_text and len(translated_text.strip()) > 0:
+                        # 번역 결과 파싱 (더 견고한 파싱)
+                        translated_lines = translated_text.strip().split('\n')
+                        current_number = None
+                        for line in translated_lines:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            
+                            # 번호로 시작하는 줄 (제목) - 다양한 형식 지원
+                            match = re.match(r'^(\d+)\.\s*(.+)', line)
+                            if match:
+                                current_number = match.group(1)
+                                translated_title = match.group(2).strip()
+                                # 불필요한 접두사 제거
+                                if translated_title.startswith('번역:'):
+                                    translated_title = translated_title.replace('번역:', '').strip()
+                                if current_number not in translation_map:
+                                    translation_map[current_number] = {}
+                                translation_map[current_number]['title'] = translated_title
+                            # 요약 줄 - 다양한 형식 지원
+                            elif current_number and ('요약' in line or line.startswith('   ')):
+                                if '요약:' in line:
+                                    translated_summary = line.split('요약:')[-1].strip()
+                                elif line.startswith('   '):
+                                    translated_summary = line.strip()
+                                else:
+                                    continue
+                                
+                                if translated_summary and current_number in translation_map:
+                                    translation_map[current_number]['summary'] = translated_summary
+                    
+                    logger.info(f"배치 번역 완료: {len(translation_map)}개 번역 성공")
+                    
+                except Exception as e:
+                    logger.warning(f"배치 번역 실패: {e}, 원문만 표시")
+                    # 폴백: 번역 실패 시 원문만 표시
+        
+        # 포맷팅: 번역 결과 포함
         for number in all_numbers:
             # 해당 번호의 헤드라인 찾기
             headline_info = next((num, title) for num, title in headlines_data if num == number)
             _, title = headline_info
             
-            # 원문 그대로 표시 (번역 없음)
+            # 원문 표시
             formatted_lines.append(f"<b>{number}. {title}</b>")
+            
+            # 요약 표시
             if number in summary_map:
                 formatted_lines.append(f"   요약: {summary_map[number]}")
+            
+            # 번역 결과 표시 (배치 번역 결과 사용)
+            if number in translation_map:
+                translated = translation_map[number]
+                if 'title' in translated:
+                    formatted_lines.append(f"   🇰🇷 번역: {translated['title']}")
+                if 'summary' in translated and translated['summary']:
+                    formatted_lines.append(f"      요약 번역: {translated['summary']}")
+            
             formatted_lines.append("")  # 빈 줄
         
         result = "\n".join(formatted_lines)
-        logger.info(f"뉴스 포맷팅 완료: {len(headlines_data)}개 (API 호출 없음 - Batch Processing)")
+        logger.info(f"뉴스 포맷팅 완료: {len(headlines_data)}개")
         return result
         
     except Exception as e:
         logger.warning(f"뉴스 헤드라인 포맷팅 실패: {e}, 원문 그대로 사용")
         return headlines_text
+
+
+def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
+    """
+    국내 주식 특화 데이터 수집 (수급, ETF 괴리율)
+    
+    Args:
+        ticker_code: 국내 티커 코드 (예: '005930' for '005930.KS')
+    
+    Returns:
+        {
+            'foreign_net': 외국인 순매매량 (만 주, 최근 3거래일 합계),
+            'institutional_net': 기관 순매매량 (만 주, 최근 3거래일 합계),
+            'disparity_rate': ETF 괴리율 (NAV 대비 %, ETF가 아닐 경우 None)
+        }
+    """
+    result = {
+        'foreign_net': None,
+        'institutional_net': None,
+        'disparity_rate': None
+    }
+    
+    # .KS, .KQ 제거하여 순수 코드만 추출
+    code = ticker_code.replace('.KS', '').replace('.KQ', '')
+    
+    try:
+        # 1. 수급 데이터 수집 (외인/기관 순매매량)
+        try:
+            url = f"https://finance.naver.com/item/frgn.naver?code={code}"
+            logger.debug(f"수급 데이터 수집 중: {url}")
+            
+            response = _session.get(
+                url, 
+                headers={**HEADERS, 'Referer': 'https://finance.naver.com/'},
+                timeout=10
+            )
+            response.raise_for_status()
+            
+            # 네이버 금융은 euc-kr 인코딩
+            try:
+                content = response.content.decode('euc-kr', 'replace')
+            except (UnicodeDecodeError, AttributeError):
+                content = response.text
+            
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # 외인/기관 순매매량 테이블 찾기
+            # 최근 3거래일 데이터 추출
+            foreign_net_sum = 0.0
+            institutional_net_sum = 0.0
+            count = 0
+            
+            # 외인/기관 관련 테이블 찾기
+            tables = soup.select('table')
+            target_table = None
+            foreign_col_idx = None
+            institutional_col_idx = None
+            
+            for table in tables:
+                table_text = table.get_text()
+                if '외국인' in table_text or '기관' in table_text or '순매매' in table_text:
+                    # 헤더 행 찾기
+                    rows = table.select('tr')
+                    if len(rows) > 0:
+                        header_row = rows[0]
+                        headers = header_row.select('th, td')
+                        header_texts = [h.get_text(strip=True) for h in headers]
+                        
+                        # 컬럼 인덱스 찾기
+                        for i, header_text in enumerate(header_texts):
+                            if '기관' in header_text and '순매매' in table_text:
+                                institutional_col_idx = i
+                            elif ('외국인' in header_text or '외인' in header_text) and '순매매' in table_text:
+                                foreign_col_idx = i
+                        
+                        # 순매매량 컬럼이 모두 찾아졌으면 이 테이블 사용
+                        if institutional_col_idx is not None or foreign_col_idx is not None:
+                            target_table = table
+                            logger.debug(f"수급 테이블 발견: 기관={institutional_col_idx}, 외인={foreign_col_idx}")
+                            break
+            
+            if target_table is None:
+                logger.warning(f"{ticker_code}: 외인/기관 순매매량 테이블을 찾을 수 없음")
+            else:
+                rows = target_table.select('tr')
+                # 서브헤더 행 스킵 (두 번째 행이 '순매매량', '순매매량', '보유주수', '보유율'일 수 있음)
+                data_start_idx = 1
+                if len(rows) > 1:
+                    second_row_text = rows[1].get_text(strip=True)
+                    if '순매매량' in second_row_text and '보유주수' in second_row_text:
+                        data_start_idx = 2  # 서브헤더 행 스킵
+                
+                # 최근 3거래일 데이터 추출
+                for row in rows[data_start_idx:data_start_idx + 5]:  # 최근 5개 행 확인
+                    try:
+                        tds = row.select('td, th')
+                        if len(tds) < 5:
+                            continue
+                        
+                        # 날짜 확인 (첫 번째 컬럼)
+                        date_text = tds[0].get_text(strip=True)
+                        if not date_text or len(date_text) < 8 or '.' not in date_text:
+                            continue
+                        
+                        # 기관 순매매량 추출
+                        institutional_value = None
+                        if institutional_col_idx is not None and institutional_col_idx < len(tds):
+                            institutional_text = tds[institutional_col_idx].get_text(strip=True)
+                            try:
+                                # 숫자 추출 (쉼표, +, - 제거)
+                                institutional_value = float(institutional_text.replace(',', '').replace('+', ''))
+                                # 네이버 금융은 주 단위로 표시하므로 만주로 변환
+                                institutional_value = institutional_value / 10000  # 만주로 변환
+                            except ValueError:
+                                pass
+                        
+                        # 외국인 순매매량 추출
+                        foreign_value = None
+                        if foreign_col_idx is not None and foreign_col_idx < len(tds):
+                            foreign_text = tds[foreign_col_idx].get_text(strip=True)
+                            try:
+                                foreign_value = float(foreign_text.replace(',', '').replace('+', ''))
+                                # 네이버 금융은 주 단위로 표시하므로 만주로 변환
+                                foreign_value = foreign_value / 10000  # 만주로 변환
+                            except ValueError:
+                                pass
+                        
+                        # 합계에 추가
+                        if institutional_value is not None:
+                            institutional_net_sum += institutional_value
+                        if foreign_value is not None:
+                            foreign_net_sum += foreign_value
+                        
+                        count += 1
+                        if count >= 3:  # 최근 3거래일
+                            break
+                            
+                    except (ValueError, IndexError) as e:
+                        logger.debug(f"수급 데이터 파싱 실패 (행): {e}")
+                        continue
+            
+            if count > 0:
+                result['foreign_net'] = round(foreign_net_sum, 2)
+                result['institutional_net'] = round(institutional_net_sum, 2)
+                logger.debug(f"{ticker_code} 수급 데이터: 외인 {result['foreign_net']:.2f}만주, 기관 {result['institutional_net']:.2f}만주")
+            else:
+                logger.warning(f"{ticker_code}: 수급 데이터를 찾을 수 없음")
+                
+        except Exception as e:
+            logger.warning(f"{ticker_code} 수급 데이터 수집 실패: {e}")
+        
+        # 2. ETF 괴리율 수집 (ETF인 경우만)
+        try:
+            url = f"https://finance.naver.com/item/main.naver?code={code}"
+            logger.debug(f"ETF 괴리율 수집 중: {url}")
+            
+            response = _session.get(
+                url,
+                headers={**HEADERS, 'Referer': 'https://finance.naver.com/'},
+                timeout=10
+            )
+            response.raise_for_status()
+            
+            try:
+                content = response.content.decode('euc-kr', 'replace')
+            except (UnicodeDecodeError, AttributeError):
+                content = response.text
+            
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # NAV와 시장가 찾기
+            nav_value = None
+            market_price = None
+            
+            # 현재가 찾기 (blind 클래스 사용 - 가장 먼저)
+            blind_elements = soup.select('.no_today .blind, .blind')
+            for elem in blind_elements:
+                try:
+                    price_text = elem.get_text(strip=True)
+                    # 숫자만 있는 경우 현재가로 간주
+                    if price_text.replace(',', '').isdigit():
+                        market_price = float(price_text.replace(',', ''))
+                        if market_price > 100:  # 합리적인 가격 범위
+                            break
+                except ValueError:
+                    continue
+            
+            # NAV 찾기 (테이블에서)
+            tables = soup.select('table')
+            for table in tables:
+                rows = table.select('tr')
+                for row in rows:
+                    cells = row.select('td, th')
+                    cell_texts = [c.get_text(strip=True) for c in cells]
+                    
+                    # NAV 패턴 찾기
+                    for i, cell_text in enumerate(cell_texts):
+                        if ('NAV' in cell_text or '순자산가치' in cell_text or '기준가' in cell_text) and nav_value is None:
+                            # 다음 셀 또는 같은 셀에서 숫자 찾기
+                            if i + 1 < len(cells):
+                                nav_text = cells[i + 1].get_text(strip=True)
+                            else:
+                                nav_text = cell_text
+                            
+                            # 숫자 추출
+                            import re
+                            nav_match = re.search(r'[\d,]+', nav_text.replace('원', ''))
+                            if nav_match:
+                                try:
+                                    nav_value = float(nav_match.group().replace(',', ''))
+                                    if nav_value > 0:
+                                        break
+                                except ValueError:
+                                    pass
+            
+            # NAV가 있고 시장가가 있으면 괴리율 계산
+            if nav_value and nav_value > 0 and market_price and market_price > 0:
+                disparity_rate = ((market_price - nav_value) / nav_value) * 100
+                result['disparity_rate'] = round(disparity_rate, 2)
+                logger.debug(f"{ticker_code} ETF 괴리율: {result['disparity_rate']:.2f}% (NAV: {nav_value:,.0f}, 시장가: {market_price:,.0f})")
+            else:
+                # ETF가 아닐 수 있음 (일반 주식은 NAV가 없음)
+                logger.debug(f"{ticker_code}: ETF 괴리율 데이터 없음 (일반 주식일 수 있음, NAV: {nav_value}, 시장가: {market_price})")
+                
+        except Exception as e:
+            logger.debug(f"{ticker_code} ETF 괴리율 수집 실패 (일반 주식일 수 있음): {e}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"{ticker_code} 국내 주식 데이터 수집 실패: {e}")
+        return result
+
+
+def get_global_institutional_data(ticker_symbol: str) -> Optional[float]:
+    """
+    해외 주식 기관 보유 비중 수집
+    
+    Args:
+        ticker_symbol: 해외 티커 심볼 (예: 'AAPL', 'NVDA')
+    
+    Returns:
+        기관 보유 비중 (%) 또는 None (실패 시)
+    """
+    try:
+        stock = yf.Ticker(ticker_symbol)
+        info = stock.info
+        
+        if not info or len(info) == 0:
+            return None
+        
+        # heldPercentInstitutions 정보 추출
+        held_percent = info.get('heldPercentInstitutions')
+        
+        if held_percent is not None:
+            held_percent = float(held_percent) * 100  # 소수점을 퍼센트로 변환
+            return round(held_percent, 2)
+        
+        return None
+        
+    except Exception as e:
+        logger.debug(f"{ticker_symbol} 기관 보유 비중 수집 실패: {e}")
+        return None

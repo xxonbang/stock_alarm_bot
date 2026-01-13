@@ -21,6 +21,7 @@ tickers_interest_domestic: #관심주식_국내
   - "000660.KS" # SK하이닉스 (코스피)
 
 tickers_interest_overseas: #관심주식_해외
+  - "IREN" #아이렌
   - "TSLA" # 테슬라
   - "NVDA" # 엔비디아
   - "AAPL" # 애플
