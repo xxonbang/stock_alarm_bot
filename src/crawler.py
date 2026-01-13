@@ -441,7 +441,8 @@ def get_fred_macro_data() -> str:
     
     if Fred is None:
         logger.warning("fredapi 라이브러리가 없어 FRED 데이터를 수집할 수 없습니다.")
-        return "[MACRO DATA (Source: Federal Reserve FRED)]\nFRED API 라이브러리 미설치"
+        logger.info("💡 FRED 데이터 수집을 원하시면 다음 명령어로 설치하세요: pip install fredapi")
+        return "[MACRO DATA (Source: Federal Reserve FRED)]\n⚠️ FRED API 라이브러리(fredapi) 미설치 - yfinance 기반 지표로 대체됨"
     
     try:
         # FRED API Key (환경변수 또는 기본값)

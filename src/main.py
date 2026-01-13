@@ -158,6 +158,9 @@ def main():
         
         # Step 7: AI 일일 리포트 생성 (단 1회 API 호출 - Batch Processing)
         logger.info("\n[Step 7] AI 일일 리포트 생성 시작 (단 1회 API 호출)...")
+        # 번역과 리포트 생성 사이에 짧은 지연 (Rate Limit 방지)
+        import time
+        time.sleep(3)  # 3초 대기 (할당량 관리)
         ai_briefing, token_usage = researcher.generate_briefing(collected_data)
         logger.info("AI 일일 리포트 생성 완료")
         
