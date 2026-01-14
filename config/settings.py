@@ -58,11 +58,16 @@ class Settings:
         
         # API Keys (환경변수에서 로드)
         # 주의: 실제 키는 GitHub Secrets 또는 .env 파일에 저장
-        # 제공된 키: AIzaSyAhz6iY4UFOw3xyTSoGQUoc2fHSEBAWPoA
-        # 위 키를 사용하거나 Secrets를 사용하세요
         self.telegram_token = get_env_var('TELEGRAM_TOKEN')
         self.chat_id = get_env_var('CHAT_ID')
-        self.google_api_key = get_env_var('GOOGLE_API_KEY')
+        
+        # Google API Keys (01, 02로 구분)
+        # 01번 키 (기존), 02번 키 (신규)
+        self.google_api_key_01 = get_env_var('GOOGLE_API_KEY_01')
+        self.google_api_key_02 = get_env_var('GOOGLE_API_KEY_02')
+        
+        # 기본값은 01번 키 (하위 호환성)
+        self.google_api_key = self.google_api_key_01
     
     def __repr__(self):
         return f"Settings(tickers={len(self.tickers)}개, schedule_times={len(self.schedule_times)}개)"

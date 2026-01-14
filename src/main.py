@@ -118,15 +118,14 @@ def main():
         news_with_context = get_market_news_with_context(max_items=10)
         logger.info("뉴스 수집 완료")
         
-        # Step 4: 뉴스 포맷팅 (영어 뉴스 한국어 번역 포함)
-        logger.info("\n[Step 4] 뉴스 포맷팅 시작 (영어 뉴스 번역 포함)...")
-        # AI researcher를 먼저 초기화 (번역용)
-        researcher = create_researcher(settings.google_api_key)
-        news_formatted = translate_headlines(news_with_context, ai_researcher=researcher)
+        # Step 4: 뉴스 포맷팅 (영어 뉴스 한국어 번역 포함 - deep-translator 사용)
+        logger.info("\n[Step 4] 뉴스 포맷팅 시작 (영어 뉴스 번역 포함, deep-translator 사용)...")
+        # deep-translator를 사용한 번역 (Gemini API 호출 없음)
+        news_formatted = translate_headlines(news_with_context)
         logger.info("뉴스 포맷팅 완료")
         
-        # Step 5: 수집된 데이터 통합 (AI 분석용 - Batch Processing)
-        logger.info("\n[Step 5] 수집된 데이터 통합 (Batch Processing)...")
+        # Step 5: 수집된 데이터 통합 (AI 분석용)
+        logger.info("\n[Step 5] 수집된 데이터 통합 (AI 분석용)...")
         # AI 분석을 위해 모든 카테고리 메시지를 합침
         all_stock_summaries = "\n\n".join([msg for msg in stock_summaries.values() if msg])
         collected_data = f"""[PORTFOLIO_DATA]
@@ -152,15 +151,13 @@ def main():
 {news_formatted}"""
         logger.info(f"통합 데이터 준비 완료: {len(collected_data)}자")
         
-        # Step 6: AI 초기화 (이미 Step 4에서 초기화됨, 재사용)
+        # Step 6: AI 초기화 (리포트 생성용)
         logger.info("\n[Step 6] AI 리포트 생성 준비...")
-        # researcher는 이미 Step 4에서 생성되어 재사용
+        # AI researcher 초기화 (fallback 키 포함)
+        researcher = create_researcher(settings.google_api_key_01, settings.google_api_key_02)
         
-        # Step 7: AI 일일 리포트 생성 (단 1회 API 호출 - Batch Processing)
-        logger.info("\n[Step 7] AI 일일 리포트 생성 시작 (단 1회 API 호출)...")
-        # 번역과 리포트 생성 사이에 짧은 지연 (Rate Limit 방지)
-        import time
-        time.sleep(3)  # 3초 대기 (할당량 관리)
+        # Step 7: AI 일일 리포트 생성 (최종 1회 API 호출)
+        logger.info("\n[Step 7] AI 일일 리포트 생성 시작 (최종 1회 API 호출)...")
         ai_briefing, token_usage = researcher.generate_briefing(collected_data)
         logger.info("AI 일일 리포트 생성 완료")
         

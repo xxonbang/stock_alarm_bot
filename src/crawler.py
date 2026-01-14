@@ -801,7 +801,8 @@ def get_fear_greed_index(vix_value: Optional[float] = None) -> Optional[str]:
     return None
 
 
-def get_economic_calendar(max_retries: int = 3) -> str:
+# 제거됨: main.py에서 사용되지 않음
+# def get_economic_calendar(max_retries: int = 3) -> str:
     """
     Yahoo Finance Economic Calendar에서 오늘부터 향후 3일간의 중요 경제 지표 수집
     Investing.com 대신 Yahoo Finance 사용 (봇 차단 우회)
@@ -1298,153 +1299,6 @@ def get_korea_hot_themes(max_themes: int = 3) -> str:
         return "**🚀 오늘의 강세 테마:**\n수집 실패"
 
 
-def get_seeking_alpha_outlook(max_retries: int = 3) -> str:
-    """
-    yfinance 내장 뉴스 기능을 사용한 전문가 시장 전망 수집
-    웹 크롤링 대신 안정적인 라이브러리 기능 활용
-    
-    Args:
-        max_retries: 최대 재시도 횟수 (yfinance는 안정적이므로 거의 사용 안 됨)
-    
-    Returns:
-        포맷팅된 시장 전망 텍스트
-    """
-    logger.info("=== 전문가 시장 전망 수집 시작 (yfinance 뉴스 기능) ===")
-    print("=== 전문가 시장 전망 수집 시작 (yfinance 뉴스 기능) ===")
-    
-    # 시장을 대표하는 주요 지수 티커
-    market_tickers = {
-        '^GSPC': 'S&P 500',
-        '^IXIC': '나스닥',
-        '^KS11': '코스피',
-        '^DJI': '다우존스'
-    }
-    
-    # 관련 키워드 (제목에 포함되어야 함) - 더 넓은 범위로 확장
-    relevant_keywords = [
-        'outlook', 'forecast', 'analysis', 'fed', 'rate', 'market', 'economy', 'economic',
-        '전망', '예측', '분석', '연준', '금리', '시장', '경제',
-        'target', 'upgrade', 'downgrade', 'bullish', 'bearish', 'inflation', 'gdp',
-        '목표가', '상향', '하향', '상승', '하락', '인플레이션',
-        'policy', 'central bank', '정책', '중앙은행', '기준금리'
-    ]
-    
-    all_articles = []
-    
-    for attempt in range(max_retries):
-        try:
-            for ticker, market_name in market_tickers.items():
-                try:
-                    logger.info(f"{market_name} ({ticker}) 뉴스 수집 중...")
-                    print(f"{market_name} ({ticker}) 뉴스 수집 중...")
-                    
-                    # yfinance Ticker 객체 생성
-                    ticker_obj = yf.Ticker(ticker)
-                    
-                    # 뉴스 가져오기
-                    news_list = ticker_obj.news
-                    
-                    if not news_list:
-                        logger.debug(f"{ticker}: 뉴스 없음")
-                        continue
-                    
-                    logger.info(f"{ticker}: {len(news_list)}개 뉴스 발견")
-                    
-                    # 뉴스 필터링 (키워드 기반)
-                    for news_item in news_list:
-                        try:
-                            # yfinance 뉴스 구조: content.title, canonicalUrl.url, provider.displayName
-                            content = news_item.get('content', {})
-                            title = content.get('title', '') if isinstance(content, dict) else ''
-                            
-                            # link 추출
-                            canonical_url = news_item.get('canonicalUrl', {})
-                            link = canonical_url.get('url', '') if isinstance(canonical_url, dict) else ''
-                            
-                            # publisher 추출
-                            provider = news_item.get('provider', {})
-                            publisher = provider.get('displayName', 'Yahoo Finance') if isinstance(provider, dict) else 'Yahoo Finance'
-                            
-                            if not title:
-                                continue
-                            
-                            # 키워드 필터링 (더 유연하게)
-                            title_lower = title.lower()
-                            
-                            # 키워드가 있으면 우선순위 높음, 없어도 최근 뉴스면 포함 (최대 3개)
-                            has_keyword = any(keyword.lower() in title_lower for keyword in relevant_keywords)
-                            
-                            if has_keyword or len(all_articles) < 3:
-                                all_articles.append({
-                                    'title': title,
-                                    'link': link,
-                                    'publisher': publisher,
-                                    'market': market_name,
-                                    'has_keyword': has_keyword
-                                })
-                                
-                                # 충분한 기사 수집되면 중단
-                                if len(all_articles) >= 10:
-                                    break
-                        except Exception as e:
-                            logger.debug(f"뉴스 항목 파싱 실패: {e}")
-                            continue
-                    
-                    if len(all_articles) >= 10:
-                        break
-                            
-                except Exception as e:
-                    logger.warning(f"{ticker} 뉴스 수집 실패: {e}")
-                    print(f"⚠️ {ticker} 뉴스 수집 실패: {e}")
-                    continue
-            
-            # 중복 제거 (제목 기준) 및 키워드 우선순위 정렬
-            unique_articles = []
-            seen_titles = set()
-            for article in all_articles:
-                title_lower = article['title'].lower()
-                if title_lower not in seen_titles:
-                    seen_titles.add(title_lower)
-                    unique_articles.append(article)
-            
-            # 키워드가 있는 기사를 우선 정렬
-            unique_articles.sort(key=lambda x: (not x.get('has_keyword', False), x['title']))
-            
-            # 최대 5개로 제한
-            unique_articles = unique_articles[:5]
-            
-            if unique_articles:
-                result = "**📊 전문가 시장 전망 (yfinance 뉴스):**\n\n"
-                for i, article in enumerate(unique_articles, 1):
-                    result += f"{i}. <b>{article['title']}</b>\n"
-                    if article['publisher']:
-                        result += f"   📰 출처: {article['publisher']} ({article['market']})\n"
-                    if article['link']:
-                        result += f"   🔗 {article['link']}\n"
-                    result += "\n"
-                
-                logger.info(f"전문가 시장 전망 수집 완료: {len(unique_articles)}개 기사")
-                print(f"✅ 전문가 시장 전망 수집 완료: {len(unique_articles)}개 기사")
-                return result
-            else:
-                result = "**📊 전문가 시장 전망:**\n관련 기사 없음 (키워드 필터링 후)"
-                logger.info("전문가 시장 전망: 관련 기사 없음")
-                print("전문가 시장 전망: 관련 기사 없음")
-                return result
-                
-        except Exception as e:
-            logger.warning(f"전문가 전망 수집 실패 (시도 {attempt + 1}/{max_retries}): {e}")
-            print(f"❌ 전문가 전망 수집 실패 (시도 {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                continue
-    
-    # 모든 시도 실패
-    logger.warning("전문가 시장 전망 수집 실패 (모든 시도 실패)")
-    print("❌ 전문가 시장 전망 수집 실패 (모든 시도 실패)")
-    return "**📊 전문가 시장 전망:**\n데이터 수집 실패"
-
-
 def get_hankyung_consensus() -> str:
     """
     네이버 금융 리서치 수집 (국내 시장 재료)
@@ -1701,12 +1555,8 @@ def get_google_news_rss() -> str:
         return result
 
 
-def get_market_headlines(max_items: int = 10) -> str:
-    """
-    기존 호환성을 위한 함수 (제목만 수집)
-    새로운 get_market_news_with_context() 사용 권장
-    """
-    return get_market_news_with_context(max_items)
+# 제거됨: main.py에서 사용되지 않음 (get_market_news_with_context 사용)
+# def get_market_headlines(max_items: int = 10) -> str:
 
 
 def is_korean_text(text: str) -> bool:
@@ -1725,14 +1575,13 @@ def is_korean_text(text: str) -> bool:
     return bool(korean_pattern.search(text))
 
 
-def translate_headlines(headlines_text: str, ai_researcher=None) -> str:
+def translate_headlines(headlines_text: str) -> str:
     """
-    뉴스 헤드라인 포맷팅 및 영어 뉴스 한국어 번역
+    뉴스 헤드라인 포맷팅 및 영어 뉴스 한국어 번역 (deep-translator 사용)
     영어 뉴스의 경우 한국어 번역을 하단에 추가
     
     Args:
         headlines_text: 원문 헤드라인 텍스트
-        ai_researcher: AIResearcher 인스턴스 (번역용, None이면 번역 스킵)
     
     Returns:
         포맷팅된 뉴스 텍스트 (영어 뉴스는 한국어 번역 포함)
@@ -1742,6 +1591,7 @@ def translate_headlines(headlines_text: str, ai_researcher=None) -> str:
     
     try:
         import re
+        from deep_translator import GoogleTranslator
         
         # 헤드라인만 추출 (번호와 제목)
         lines = headlines_text.split('\n')
@@ -1788,82 +1638,55 @@ def translate_headlines(headlines_text: str, ai_researcher=None) -> str:
         # 모든 헤드라인을 번호 순서대로 출력
         all_numbers = sorted(set([num for num, _ in headlines_data]), key=int)
         
-        # 배치 번역: 모든 영어 뉴스를 한 번에 번역 (API 호출 1회로 최적화)
+        # 번역이 필요한 뉴스 수집
+        items_to_translate = []
+        for number in all_numbers:
+            headline_info = next((num, title) for num, title in headlines_data if num == number)
+            _, title = headline_info
+            
+            if not is_korean_text(title):
+                summary = summary_map.get(number, "")
+                items_to_translate.append({
+                    'number': number,
+                    'title': title,
+                    'summary': summary if summary and not is_korean_text(summary) and len(summary) > 20 else None
+                })
+        
+        # deep-translator를 사용한 번역
         translation_map = {}  # number -> {'title': 번역된 제목, 'summary': 번역된 요약}
         
-        if ai_researcher is not None:
-            # 번역이 필요한 뉴스 수집
-            items_to_translate = []
-            for number in all_numbers:
-                headline_info = next((num, title) for num, title in headlines_data if num == number)
-                _, title = headline_info
+        if items_to_translate:
+            try:
+                logger.info(f"뉴스 번역 시작: {len(items_to_translate)}개 뉴스 (deep-translator 사용)")
                 
-                if not is_korean_text(title):
-                    summary = summary_map.get(number, "")
-                    items_to_translate.append({
-                        'number': number,
-                        'title': title,
-                        'summary': summary if summary and not is_korean_text(summary) and len(summary) > 20 else None
-                    })
-            
-            # 번역이 필요한 항목이 있으면 한 번에 번역
-            if items_to_translate:
-                try:
-                    # 배치 번역 프롬프트 생성
-                    translate_items = []
-                    for item in items_to_translate:
-                        translate_items.append(f"{item['number']}. {item['title']}")
+                # GoogleTranslator 초기화
+                translator = GoogleTranslator(source='en', target='ko')
+                
+                # 각 뉴스 제목과 요약 번역
+                for item in items_to_translate:
+                    try:
+                        # 제목 번역
+                        translated_title = translator.translate(item['title'])
+                        translation_map[item['number']] = {'title': translated_title}
+                        
+                        # 요약 번역 (있는 경우)
                         if item['summary']:
-                            translate_items.append(f"   요약: {item['summary'][:200]}")
-                    
-                    batch_prompt = f"""다음 영어 뉴스 제목과 요약을 자연스러운 한국어로 번역해주세요.
-각 번호에 대해 번역만 출력하고, 다른 설명은 추가하지 마세요.
-형식은 다음과 같이 유지하세요:
-1. [번역된 제목]
-   요약: [번역된 요약] (요약이 있는 경우만)
-
-{chr(10).join(translate_items)}"""
-                    
-                    logger.info(f"배치 번역 시작: {len(items_to_translate)}개 뉴스 (API 호출 1회)")
-                    translated_text, _ = ai_researcher._call_ai(batch_prompt, max_retries=2)
-                    
-                    if translated_text and len(translated_text.strip()) > 0:
-                        # 번역 결과 파싱 (더 견고한 파싱)
-                        translated_lines = translated_text.strip().split('\n')
-                        current_number = None
-                        for line in translated_lines:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            
-                            # 번호로 시작하는 줄 (제목) - 다양한 형식 지원
-                            match = re.match(r'^(\d+)\.\s*(.+)', line)
-                            if match:
-                                current_number = match.group(1)
-                                translated_title = match.group(2).strip()
-                                # 불필요한 접두사 제거
-                                if translated_title.startswith('번역:'):
-                                    translated_title = translated_title.replace('번역:', '').strip()
-                                if current_number not in translation_map:
-                                    translation_map[current_number] = {}
-                                translation_map[current_number]['title'] = translated_title
-                            # 요약 줄 - 다양한 형식 지원
-                            elif current_number and ('요약' in line or line.startswith('   ')):
-                                if '요약:' in line:
-                                    translated_summary = line.split('요약:')[-1].strip()
-                                elif line.startswith('   '):
-                                    translated_summary = line.strip()
-                                else:
-                                    continue
-                                
-                                if translated_summary and current_number in translation_map:
-                                    translation_map[current_number]['summary'] = translated_summary
-                    
-                    logger.info(f"배치 번역 완료: {len(translation_map)}개 번역 성공")
-                    
-                except Exception as e:
-                    logger.warning(f"배치 번역 실패: {e}, 원문만 표시")
-                    # 폴백: 번역 실패 시 원문만 표시
+                            translated_summary = translator.translate(item['summary'][:200])
+                            translation_map[item['number']]['summary'] = translated_summary
+                        
+                        # Rate limit 방지를 위한 짧은 지연
+                        import time
+                        time.sleep(0.1)  # 100ms 지연
+                        
+                    except Exception as e:
+                        logger.warning(f"뉴스 {item['number']}번 번역 실패: {e}")
+                        continue
+                
+                logger.info(f"뉴스 번역 완료: {len(translation_map)}개 번역 성공")
+                
+            except Exception as e:
+                logger.warning(f"번역 라이브러리 초기화 실패: {e}, 원문만 표시")
+                # 폴백: 번역 실패 시 원문만 표시
         
         # 포맷팅: 번역 결과 포함
         for number in all_numbers:
