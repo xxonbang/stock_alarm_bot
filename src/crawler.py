@@ -1746,7 +1746,7 @@ def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optio
         {
             'foreign_net': 외국인 순매매량 (만 주, 최근 3거래일 합계),
             'institutional_net': 기관 순매매량 (만 주, 최근 3거래일 합계),
-            'disparity_rate': None (KRX API에서는 제공하지 않음)
+            'disparity_rate': None (이 API는 수급 데이터만 제공)
         }
     """
     result = {
@@ -1858,6 +1858,108 @@ def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optio
     return result
 
 
+def get_etf_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optional[float]]:
+    """
+    KRX OpenAPI 'ETF 일별매매정보' API를 사용한 ETF 데이터 수집 (NAV, 종가)
+    
+    Args:
+        ticker_code: 국내 티커 코드 (예: '390390' for '390390.KS')
+        api_key: KRX OpenAPI 인증키
+    
+    Returns:
+        {
+            'disparity_rate': ETF 괴리율 (NAV 대비 %, 계산됨),
+            'nav': NAV (순자산가치),
+            'closing_price': 종가 (시장가)
+        }
+    """
+    result = {
+        'disparity_rate': None,
+        'nav': None,
+        'closing_price': None
+    }
+    
+    # .KS, .KQ 제거하여 순수 코드만 추출
+    code = ticker_code.replace('.KS', '').replace('.KQ', '')
+    
+    try:
+        from datetime import date, timedelta
+        
+        # 최근 거래일부터 역순으로 시도 (최대 5일)
+        today = date.today()
+        max_attempts = 5
+        
+        for attempt in range(max_attempts):
+            try:
+                # 기준일자 계산 (최근 거래일부터)
+                target_date = today - timedelta(days=attempt)
+                bas_dd = target_date.strftime('%Y%m%d')
+                
+                # API 호출
+                url = "https://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd"
+                headers = {
+                    "AUTH_KEY": api_key,
+                    "Content-Type": "application/json"
+                }
+                params = {
+                    "basDd": bas_dd,
+                    "isuCd": code
+                }
+                
+                logger.debug(f"ETF 일별매매정보 API 호출: {url}, basDd={bas_dd}, isuCd={code}")
+                response = _session.get(url, headers=headers, params=params, timeout=5)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # OutBlock_1에서 데이터 추출
+                    if 'OutBlock_1' in data and len(data['OutBlock_1']) > 0:
+                        row = data['OutBlock_1'][0]
+                        
+                        # NAV와 종가 추출
+                        nav_str = row.get('NAV') or row.get('순자산가치') or None
+                        closing_price_str = row.get('TDD_CLSPRC') or row.get('종가') or None
+                        
+                        if nav_str and closing_price_str:
+                            try:
+                                nav_value = float(str(nav_str).replace(',', ''))
+                                closing_price = float(str(closing_price_str).replace(',', ''))
+                                
+                                if nav_value > 0 and closing_price > 0:
+                                    # 괴리율 계산: ((종가 - NAV) / NAV) * 100
+                                    disparity_rate = ((closing_price - nav_value) / nav_value) * 100
+                                    
+                                    result['disparity_rate'] = round(disparity_rate, 2)
+                                    result['nav'] = nav_value
+                                    result['closing_price'] = closing_price
+                                    
+                                    logger.debug(f"{ticker_code} ETF 데이터 (KRX API): NAV={nav_value:,.0f}, 종가={closing_price:,.0f}, 괴리율={result['disparity_rate']:.2f}%")
+                                    return result
+                            except (ValueError, TypeError) as e:
+                                logger.debug(f"ETF 데이터 파싱 실패 (날짜: {bas_dd}): {e}")
+                                continue
+                
+                elif response.status_code == 401:
+                    logger.warning(f"ETF 일별매매정보 API 인증 실패 (401): 인증키 또는 API 이용 신청 확인 필요")
+                    break
+                else:
+                    logger.debug(f"ETF 일별매매정보 API 호출 실패: {response.status_code}, {response.text[:100]}")
+                    # 다음 날짜 시도
+                    continue
+                    
+            except Exception as e:
+                logger.debug(f"ETF 일별매매정보 API 호출 중 오류 (날짜: {target_date}): {e}")
+                continue
+        
+        if result['disparity_rate'] is None:
+            logger.debug(f"{ticker_code}: ETF 일별매매정보 API에서 데이터를 가져올 수 없음")
+    
+    except Exception as e:
+        logger.debug(f"ETF 일별매매정보 API 데이터 수집 실패: {e}")
+    
+    return result
+
+
 def get_krx_api_status() -> Dict[str, any]:
     """
     KRX API 상태 정보 반환
@@ -1922,6 +2024,7 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
     try:
         from config.settings import settings
         if settings.krx_api_key:
+            # 1-1. 수급 데이터 수집 (유가증권 일별매매정보 API)
             try:
                 krx_data = get_kr_stock_data_krx_api(ticker_code, settings.krx_api_key)
                 # KRX API에서 데이터를 성공적으로 가져온 경우
@@ -1929,9 +2032,17 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                     result['foreign_net'] = krx_data.get('foreign_net')
                     result['institutional_net'] = krx_data.get('institutional_net')
                     logger.debug(f"{ticker_code}: KRX API로 수급 데이터 수집 성공")
-                    # ETF 괴리율은 KRX API에서 제공하지 않으므로 네이버 크롤링으로 수집 계속
             except Exception as e:
-                logger.debug(f"{ticker_code}: KRX API 실패, 네이버 크롤링으로 대체: {e}")
+                logger.debug(f"{ticker_code}: KRX API 수급 데이터 실패, 네이버 크롤링으로 대체: {e}")
+            
+            # 1-2. ETF 괴리율 수집 (ETF 일별매매정보 API)
+            try:
+                etf_data = get_etf_data_krx_api(ticker_code, settings.krx_api_key)
+                if etf_data.get('disparity_rate') is not None:
+                    result['disparity_rate'] = etf_data.get('disparity_rate')
+                    logger.debug(f"{ticker_code}: KRX API로 ETF 괴리율 수집 성공 ({result['disparity_rate']:.2f}%)")
+            except Exception as e:
+                logger.debug(f"{ticker_code}: KRX API ETF 괴리율 실패, 네이버 크롤링으로 대체: {e}")
     except (ImportError, AttributeError) as e:
         logger.debug(f"KRX API 설정 확인 실패 (정상, 기존 방식 사용): {e}")
     
@@ -2071,81 +2182,81 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                 else:
                     logger.debug(f"{ticker_code} 네이버 크롤링 실패 (KRX API 데이터 사용 중): {e}")
         
-        # 2. ETF 괴리율 수집 (ETF인 경우만)
-        try:
-            url = f"https://finance.naver.com/item/main.naver?code={code}"
-            logger.debug(f"ETF 괴리율 수집 중: {url}")
-            
-            response = _session.get(
-                url,
-                headers={**HEADERS, 'Referer': 'https://finance.naver.com/'},
-                timeout=10
-            )
-            response.raise_for_status()
-            
+        # 2. ETF 괴리율 수집 (ETF인 경우만, KRX API에서 가져오지 못한 경우만)
+        if result.get('disparity_rate') is None:
             try:
-                content = response.content.decode('euc-kr', 'replace')
-            except (UnicodeDecodeError, AttributeError):
-                content = response.text
-            
-            soup = BeautifulSoup(content, 'html.parser')
-            
-            # NAV와 시장가 찾기
-            nav_value = None
-            market_price = None
-            
-            # 현재가 찾기 (blind 클래스 사용 - 가장 먼저)
-            blind_elements = soup.select('.no_today .blind, .blind')
-            for elem in blind_elements:
-                try:
-                    price_text = elem.get_text(strip=True)
-                    # 숫자만 있는 경우 현재가로 간주
-                    if price_text.replace(',', '').isdigit():
-                        market_price = float(price_text.replace(',', ''))
-                        if market_price > 100:  # 합리적인 가격 범위
-                            break
-                except ValueError:
-                    continue
-            
-            # NAV 찾기 (테이블에서)
-            tables = soup.select('table')
-            for table in tables:
-                rows = table.select('tr')
-                for row in rows:
-                    cells = row.select('td, th')
-                    cell_texts = [c.get_text(strip=True) for c in cells]
-                    
-                    # NAV 패턴 찾기
-                    for i, cell_text in enumerate(cell_texts):
-                        if ('NAV' in cell_text or '순자산가치' in cell_text or '기준가' in cell_text) and nav_value is None:
-                            # 다음 셀 또는 같은 셀에서 숫자 찾기
-                            if i + 1 < len(cells):
-                                nav_text = cells[i + 1].get_text(strip=True)
-                            else:
-                                nav_text = cell_text
-                            
-                            # 숫자 추출
-                            import re
-                            nav_match = re.search(r'[\d,]+', nav_text.replace('원', ''))
-                            if nav_match:
-                                try:
-                                    nav_value = float(nav_match.group().replace(',', ''))
-                                    if nav_value > 0:
-                                        break
-                                except ValueError:
-                                    pass
-            
-            # NAV가 있고 시장가가 있으면 괴리율 계산
-            if nav_value and nav_value > 0 and market_price and market_price > 0:
-                disparity_rate = ((market_price - nav_value) / nav_value) * 100
-                result['disparity_rate'] = round(disparity_rate, 2)
-                logger.debug(f"{ticker_code} ETF 괴리율: {result['disparity_rate']:.2f}% (NAV: {nav_value:,.0f}, 시장가: {market_price:,.0f})")
-            else:
-                # ETF가 아닐 수 있음 (일반 주식은 NAV가 없음)
-                logger.debug(f"{ticker_code}: ETF 괴리율 데이터 없음 (일반 주식일 수 있음, NAV: {nav_value}, 시장가: {market_price})")
+                url = f"https://finance.naver.com/item/main.naver?code={code}"
+                logger.debug(f"ETF 괴리율 수집 중: {url}")
                 
-        except Exception as e:
-            logger.debug(f"{ticker_code} ETF 괴리율 수집 실패 (일반 주식일 수 있음): {e}")
+                response = _session.get(
+                    url,
+                    headers={**HEADERS, 'Referer': 'https://finance.naver.com/'},
+                    timeout=10
+                )
+                response.raise_for_status()
+                
+                try:
+                    content = response.content.decode('euc-kr', 'replace')
+                except (UnicodeDecodeError, AttributeError):
+                    content = response.text
+                
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                # NAV와 시장가 찾기
+                nav_value = None
+                market_price = None
+                
+                # 현재가 찾기 (blind 클래스 사용 - 가장 먼저)
+                blind_elements = soup.select('.no_today .blind, .blind')
+                for elem in blind_elements:
+                    try:
+                        price_text = elem.get_text(strip=True)
+                        # 숫자만 있는 경우 현재가로 간주
+                        if price_text.replace(',', '').isdigit():
+                            market_price = float(price_text.replace(',', ''))
+                            if market_price > 100:  # 합리적인 가격 범위
+                                break
+                    except ValueError:
+                        continue
+                
+                # NAV 찾기 (테이블에서)
+                tables = soup.select('table')
+                for table in tables:
+                    rows = table.select('tr')
+                    for row in rows:
+                        cells = row.select('td, th')
+                        cell_texts = [c.get_text(strip=True) for c in cells]
+                        
+                        # NAV 패턴 찾기
+                        for i, cell_text in enumerate(cell_texts):
+                            if ('NAV' in cell_text or '순자산가치' in cell_text or '기준가' in cell_text) and nav_value is None:
+                                # 다음 셀 또는 같은 셀에서 숫자 찾기
+                                if i + 1 < len(cells):
+                                    nav_text = cells[i + 1].get_text(strip=True)
+                                else:
+                                    nav_text = cell_text
+                                
+                                # 숫자 추출
+                                import re
+                                nav_match = re.search(r'[\d,]+', nav_text.replace('원', ''))
+                                if nav_match:
+                                    try:
+                                        nav_value = float(nav_match.group().replace(',', ''))
+                                        if nav_value > 0:
+                                            break
+                                    except ValueError:
+                                        pass
+                
+                # NAV가 있고 시장가가 있으면 괴리율 계산
+                if nav_value and nav_value > 0 and market_price and market_price > 0:
+                    disparity_rate = ((market_price - nav_value) / nav_value) * 100
+                    result['disparity_rate'] = round(disparity_rate, 2)
+                    logger.debug(f"{ticker_code} ETF 괴리율: {result['disparity_rate']:.2f}% (NAV: {nav_value:,.0f}, 시장가: {market_price:,.0f})")
+                else:
+                    # ETF가 아닐 수 있음 (일반 주식은 NAV가 없음)
+                    logger.debug(f"{ticker_code}: ETF 괴리율 데이터 없음 (일반 주식일 수 있음, NAV: {nav_value}, 시장가: {market_price})")
+            except Exception as e:
+                logger.debug(f"{ticker_code} ETF 괴리율 수집 실패 (일반 주식일 수 있음): {e}")
         
         return result
         
