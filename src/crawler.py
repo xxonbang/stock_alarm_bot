@@ -96,6 +96,20 @@ def _create_session():
 # 전역 세션 객체 생성
 _session = _create_session()
 
+# KRX API 상태 추적 (유효기간 종료 여부)
+_krx_api_expired = False
+_krx_api_expiry_checked = False
+
+def get_krx_api_expired_status() -> bool:
+    """
+    KRX API 만료 상태 반환 (401 오류 기반)
+    
+    Returns:
+        만료 여부 (bool)
+    """
+    global _krx_api_expired
+    return _krx_api_expired
+
 
 def get_yahoo_finance_news(max_items: int = 10) -> List[Dict]:
     """
@@ -1720,9 +1734,170 @@ def translate_headlines(headlines_text: str) -> str:
         return headlines_text
 
 
+def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optional[float]]:
+    """
+    KRX OpenAPI를 사용한 국내 주식 데이터 수집 (수급 데이터)
+    
+    Args:
+        ticker_code: 국내 티커 코드 (예: '005930' for '005930.KS')
+        api_key: KRX OpenAPI 인증키
+    
+    Returns:
+        {
+            'foreign_net': 외국인 순매매량 (만 주, 최근 3거래일 합계),
+            'institutional_net': 기관 순매매량 (만 주, 최근 3거래일 합계),
+            'disparity_rate': None (KRX API에서는 제공하지 않음)
+        }
+    """
+    result = {
+        'foreign_net': None,
+        'institutional_net': None,
+        'disparity_rate': None
+    }
+    
+    # .KS, .KQ 제거하여 순수 코드만 추출
+    code = ticker_code.replace('.KS', '').replace('.KQ', '')
+    
+    try:
+        from datetime import datetime, timedelta
+        
+        # 최근 3거래일 데이터 수집
+        foreign_sum = 0.0
+        institutional_sum = 0.0
+        count = 0
+        
+        for i in range(3):
+            date = (datetime.now() - timedelta(days=i)).strftime('%Y%m%d')
+            
+            # KRX API 엔드포인트 (유가증권 일별매매정보)
+            # 주의: 실제 API 엔드포인트와 파라미터는 KRX API 명세서 확인 필요
+            url = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd"
+            
+            # 종목 코드를 KRX 형식으로 변환 (예: '005930' -> 'KR7000010008')
+            # 실제 변환 로직은 KRX API 명세서 참고 필요
+            # 여기서는 일반적인 형식으로 시도
+            isu_cd = f"KR{code.zfill(10)}"  # 임시 변환 (실제는 명세서 확인 필요)
+            
+            params = {
+                "basDd": date,
+                "isuCd": isu_cd
+            }
+            headers = {
+                "AUTH_KEY": api_key
+            }
+            
+            try:
+                response = _session.get(url, params=params, headers=headers, timeout=5)  # 짧은 타임아웃
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    # 응답 데이터 파싱 (실제 응답 구조는 KRX API 명세서 확인 필요)
+                    # 예상 구조: {'OutBlock_1': [{'외국인순매수': value, '기관순매수': value, ...}]}
+                    if 'OutBlock_1' in data and len(data['OutBlock_1']) > 0:
+                        row = data['OutBlock_1'][0]
+                        # 컬럼명은 실제 API 응답에 맞게 수정 필요
+                        foreign_value = float(row.get('외국인순매수', 0) or row.get('FRGN_NTBY_QTY', 0) or 0)
+                        inst_value = float(row.get('기관순매수', 0) or row.get('ORG_NTBY_QTY', 0) or 0)
+                        
+                        # 주 수로 변환 (이미 주 단위일 수 있음, 명세서 확인 필요)
+                        foreign_sum += foreign_value
+                        institutional_sum += inst_value
+                        count += 1
+                elif response.status_code == 401:
+                    # 401 오류 발생 시 유효기간 체크 및 만료 상태 설정
+                    global _krx_api_expired, _krx_api_expiry_checked
+                    
+                    # 유효기간 정보가 있으면 상세 체크
+                    if not _krx_api_expiry_checked:
+                        try:
+                            from config.settings import settings
+                            from datetime import date
+                            
+                            # 유효기간 정보가 있으면 체크
+                            if settings.krx_api_key_expiry:
+                                today = date.today()
+                                if today > settings.krx_api_key_expiry:
+                                    _krx_api_expired = True
+                                    logger.warning(f"⚠️ KRX API 키 유효기간이 만료되었습니다! (만료일: {settings.krx_api_key_expiry})")
+                                elif (settings.krx_api_key_expiry - today).days <= 7:
+                                    # 7일 이내 만료 예정
+                                    _krx_api_expired = True  # 만료 임박도 경고 대상
+                                    logger.warning(f"⚠️ KRX API 키 유효기간이 곧 만료됩니다! (만료일: {settings.krx_api_key_expiry}, 남은 일수: {(settings.krx_api_key_expiry - today).days}일)")
+                            
+                            _krx_api_expiry_checked = True
+                        except Exception as e:
+                            logger.debug(f"KRX API 유효기간 체크 실패: {e}")
+                    
+                    # 유효기간 정보가 없어도 401 오류 발생 시 만료로 간주
+                    if not _krx_api_expired:
+                        _krx_api_expired = True
+                        logger.warning(f"⚠️ KRX API 인증 실패 (401): 인증키 만료 또는 API 이용 신청 미승인으로 추정")
+                    
+                    logger.warning(f"KRX API 인증 실패 (401): 인증키 또는 API 이용 신청 확인 필요")
+                    break
+                else:
+                    logger.debug(f"KRX API 호출 실패: {response.status_code}, {response.text[:100]}")
+                    # 일부 실패는 무시하고 계속 시도
+                    continue
+                    
+            except Exception as e:
+                logger.debug(f"KRX API 호출 중 오류 (날짜: {date}): {e}")
+                continue
+        
+        if count > 0:
+            # 만주로 변환 (API가 주 단위로 반환한다고 가정)
+            result['foreign_net'] = round(foreign_sum / 10000, 2)
+            result['institutional_net'] = round(institutional_sum / 10000, 2)
+            logger.debug(f"{ticker_code} KRX API 데이터: 외인 {result['foreign_net']:.2f}만주, 기관 {result['institutional_net']:.2f}만주")
+        else:
+            logger.debug(f"{ticker_code}: KRX API에서 데이터를 가져올 수 없음")
+    
+    except Exception as e:
+        logger.debug(f"KRX API 데이터 수집 실패: {e}")
+    
+    return result
+
+
+def get_krx_api_status() -> Dict[str, any]:
+    """
+    KRX API 상태 정보 반환
+    
+    Returns:
+        {
+            'expired': 유효기간 만료 여부 (bool),
+            'expiry_date': 만료일 (date 또는 None),
+            'days_until_expiry': 만료까지 남은 일수 (int 또는 None)
+        }
+    """
+    try:
+        from config.settings import settings
+        from datetime import date
+        
+        if not settings.krx_api_key:
+            return {'expired': False, 'expiry_date': None, 'days_until_expiry': None}
+        
+        if settings.krx_api_key_expiry:
+            today = date.today()
+            days_left = (settings.krx_api_key_expiry - today).days
+            return {
+                'expired': today > settings.krx_api_key_expiry,
+                'expiry_date': settings.krx_api_key_expiry,
+                'days_until_expiry': days_left if days_left >= 0 else 0
+            }
+        else:
+            return {'expired': False, 'expiry_date': None, 'days_until_expiry': None}
+    except Exception as e:
+        logger.debug(f"KRX API 상태 확인 실패: {e}")
+        return {'expired': False, 'expiry_date': None, 'days_until_expiry': None}
+
+
 def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
     """
     국내 주식 특화 데이터 수집 (수급, ETF 괴리율)
+    
+    Fallback 메커니즘:
+    1차: KRX OpenAPI 시도 (인증키가 있는 경우)
+    2차: 네이버 금융 크롤링 (기존 방식, Fallback)
     
     Args:
         ticker_code: 국내 티커 코드 (예: '005930' for '005930.KS')
@@ -1743,131 +1918,158 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
     # .KS, .KQ 제거하여 순수 코드만 추출
     code = ticker_code.replace('.KS', '').replace('.KQ', '')
     
+    # 1차: KRX API 시도 (인증키가 있는 경우만)
+    try:
+        from config.settings import settings
+        if settings.krx_api_key:
+            try:
+                krx_data = get_kr_stock_data_krx_api(ticker_code, settings.krx_api_key)
+                # KRX API에서 데이터를 성공적으로 가져온 경우
+                if krx_data.get('foreign_net') is not None or krx_data.get('institutional_net') is not None:
+                    result['foreign_net'] = krx_data.get('foreign_net')
+                    result['institutional_net'] = krx_data.get('institutional_net')
+                    logger.debug(f"{ticker_code}: KRX API로 수급 데이터 수집 성공")
+                    # ETF 괴리율은 KRX API에서 제공하지 않으므로 네이버 크롤링으로 수집 계속
+            except Exception as e:
+                logger.debug(f"{ticker_code}: KRX API 실패, 네이버 크롤링으로 대체: {e}")
+    except (ImportError, AttributeError) as e:
+        logger.debug(f"KRX API 설정 확인 실패 (정상, 기존 방식 사용): {e}")
+    
     try:
         # 1. 수급 데이터 수집 (외인/기관 순매매량)
-        try:
-            url = f"https://finance.naver.com/item/frgn.naver?code={code}"
-            logger.debug(f"수급 데이터 수집 중: {url}")
-            
-            response = _session.get(
-                url, 
-                headers={**HEADERS, 'Referer': 'https://finance.naver.com/'},
-                timeout=10
-            )
-            response.raise_for_status()
-            
-            # 네이버 금융은 euc-kr 인코딩
+        # KRX API에서 이미 데이터를 가져온 경우 스킵
+        if result.get('foreign_net') is None and result.get('institutional_net') is None:
             try:
-                content = response.content.decode('euc-kr', 'replace')
-            except (UnicodeDecodeError, AttributeError):
-                content = response.text
-            
-            soup = BeautifulSoup(content, 'html.parser')
-            
-            # 외인/기관 순매매량 테이블 찾기
-            # 최근 3거래일 데이터 추출
-            foreign_net_sum = 0.0
-            institutional_net_sum = 0.0
-            count = 0
-            
-            # 외인/기관 관련 테이블 찾기
-            tables = soup.select('table')
-            target_table = None
-            foreign_col_idx = None
-            institutional_col_idx = None
-            
-            for table in tables:
-                table_text = table.get_text()
-                if '외국인' in table_text or '기관' in table_text or '순매매' in table_text:
-                    # 헤더 행 찾기
-                    rows = table.select('tr')
-                    if len(rows) > 0:
-                        header_row = rows[0]
-                        headers = header_row.select('th, td')
-                        header_texts = [h.get_text(strip=True) for h in headers]
-                        
-                        # 컬럼 인덱스 찾기
-                        for i, header_text in enumerate(header_texts):
-                            if '기관' in header_text and '순매매' in table_text:
-                                institutional_col_idx = i
-                            elif ('외국인' in header_text or '외인' in header_text) and '순매매' in table_text:
-                                foreign_col_idx = i
-                        
-                        # 순매매량 컬럼이 모두 찾아졌으면 이 테이블 사용
-                        if institutional_col_idx is not None or foreign_col_idx is not None:
-                            target_table = table
-                            logger.debug(f"수급 테이블 발견: 기관={institutional_col_idx}, 외인={foreign_col_idx}")
-                            break
-            
-            if target_table is None:
-                logger.warning(f"{ticker_code}: 외인/기관 순매매량 테이블을 찾을 수 없음")
-            else:
-                rows = target_table.select('tr')
-                # 서브헤더 행 스킵 (두 번째 행이 '순매매량', '순매매량', '보유주수', '보유율'일 수 있음)
-                data_start_idx = 1
-                if len(rows) > 1:
-                    second_row_text = rows[1].get_text(strip=True)
-                    if '순매매량' in second_row_text and '보유주수' in second_row_text:
-                        data_start_idx = 2  # 서브헤더 행 스킵
+                url = f"https://finance.naver.com/item/frgn.naver?code={code}"
+                logger.debug(f"수급 데이터 수집 중: {url}")
                 
+                response = _session.get(
+                    url, 
+                    headers={**HEADERS, 'Referer': 'https://finance.naver.com/'},
+                    timeout=10
+                )
+                response.raise_for_status()
+                
+                # 네이버 금융은 euc-kr 인코딩
+                try:
+                    content = response.content.decode('euc-kr', 'replace')
+                except (UnicodeDecodeError, AttributeError):
+                    content = response.text
+                
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                # 외인/기관 순매매량 테이블 찾기
                 # 최근 3거래일 데이터 추출
-                for row in rows[data_start_idx:data_start_idx + 5]:  # 최근 5개 행 확인
-                    try:
-                        tds = row.select('td, th')
-                        if len(tds) < 5:
-                            continue
-                        
-                        # 날짜 확인 (첫 번째 컬럼)
-                        date_text = tds[0].get_text(strip=True)
-                        if not date_text or len(date_text) < 8 or '.' not in date_text:
-                            continue
-                        
-                        # 기관 순매매량 추출
-                        institutional_value = None
-                        if institutional_col_idx is not None and institutional_col_idx < len(tds):
-                            institutional_text = tds[institutional_col_idx].get_text(strip=True)
-                            try:
-                                # 숫자 추출 (쉼표, +, - 제거)
-                                institutional_value = float(institutional_text.replace(',', '').replace('+', ''))
-                                # 네이버 금융은 주 단위로 표시하므로 만주로 변환
-                                institutional_value = institutional_value / 10000  # 만주로 변환
-                            except ValueError:
-                                pass
-                        
-                        # 외국인 순매매량 추출
-                        foreign_value = None
-                        if foreign_col_idx is not None and foreign_col_idx < len(tds):
-                            foreign_text = tds[foreign_col_idx].get_text(strip=True)
-                            try:
-                                foreign_value = float(foreign_text.replace(',', '').replace('+', ''))
-                                # 네이버 금융은 주 단위로 표시하므로 만주로 변환
-                                foreign_value = foreign_value / 10000  # 만주로 변환
-                            except ValueError:
-                                pass
-                        
-                        # 합계에 추가
-                        if institutional_value is not None:
-                            institutional_net_sum += institutional_value
-                        if foreign_value is not None:
-                            foreign_net_sum += foreign_value
-                        
-                        count += 1
-                        if count >= 3:  # 최근 3거래일
-                            break
-                            
-                    except (ValueError, IndexError) as e:
-                        logger.debug(f"수급 데이터 파싱 실패 (행): {e}")
-                        continue
-            
-            if count > 0:
-                result['foreign_net'] = round(foreign_net_sum, 2)
-                result['institutional_net'] = round(institutional_net_sum, 2)
-                logger.debug(f"{ticker_code} 수급 데이터: 외인 {result['foreign_net']:.2f}만주, 기관 {result['institutional_net']:.2f}만주")
-            else:
-                logger.warning(f"{ticker_code}: 수급 데이터를 찾을 수 없음")
+                foreign_net_sum = 0.0
+                institutional_net_sum = 0.0
+                count = 0
                 
-        except Exception as e:
-            logger.warning(f"{ticker_code} 수급 데이터 수집 실패: {e}")
+                # 외인/기관 관련 테이블 찾기
+                tables = soup.select('table')
+                target_table = None
+                foreign_col_idx = None
+                institutional_col_idx = None
+                
+                for table in tables:
+                    table_text = table.get_text()
+                    if '외국인' in table_text or '기관' in table_text or '순매매' in table_text:
+                        # 헤더 행 찾기
+                        rows = table.select('tr')
+                        if len(rows) > 0:
+                            header_row = rows[0]
+                            headers = header_row.select('th, td')
+                            header_texts = [h.get_text(strip=True) for h in headers]
+                            
+                            # 컬럼 인덱스 찾기
+                            for i, header_text in enumerate(header_texts):
+                                if '기관' in header_text and '순매매' in table_text:
+                                    institutional_col_idx = i
+                                elif ('외국인' in header_text or '외인' in header_text) and '순매매' in table_text:
+                                    foreign_col_idx = i
+                            
+                            # 순매매량 컬럼이 모두 찾아졌으면 이 테이블 사용
+                            if institutional_col_idx is not None or foreign_col_idx is not None:
+                                target_table = table
+                                logger.debug(f"수급 테이블 발견: 기관={institutional_col_idx}, 외인={foreign_col_idx}")
+                                break
+                
+                if target_table is None:
+                    logger.warning(f"{ticker_code}: 외인/기관 순매매량 테이블을 찾을 수 없음")
+                else:
+                    rows = target_table.select('tr')
+                    # 서브헤더 행 스킵 (두 번째 행이 '순매매량', '순매매량', '보유주수', '보유율'일 수 있음)
+                    data_start_idx = 1
+                    if len(rows) > 1:
+                        second_row_text = rows[1].get_text(strip=True)
+                        if '순매매량' in second_row_text and '보유주수' in second_row_text:
+                            data_start_idx = 2  # 서브헤더 행 스킵
+                    
+                    # 최근 3거래일 데이터 추출
+                    for row in rows[data_start_idx:data_start_idx + 5]:  # 최근 5개 행 확인
+                        try:
+                            tds = row.select('td, th')
+                            if len(tds) < 5:
+                                continue
+                            
+                            # 날짜 확인 (첫 번째 컬럼)
+                            date_text = tds[0].get_text(strip=True)
+                            if not date_text or len(date_text) < 8 or '.' not in date_text:
+                                continue
+                            
+                            # 기관 순매매량 추출
+                            institutional_value = None
+                            if institutional_col_idx is not None and institutional_col_idx < len(tds):
+                                institutional_text = tds[institutional_col_idx].get_text(strip=True)
+                                try:
+                                    # 숫자 추출 (쉼표, +, - 제거)
+                                    institutional_value = float(institutional_text.replace(',', '').replace('+', ''))
+                                    # 네이버 금융은 주 단위로 표시하므로 만주로 변환
+                                    institutional_value = institutional_value / 10000  # 만주로 변환
+                                except ValueError:
+                                    pass
+                            
+                            # 외국인 순매매량 추출
+                            foreign_value = None
+                            if foreign_col_idx is not None and foreign_col_idx < len(tds):
+                                foreign_text = tds[foreign_col_idx].get_text(strip=True)
+                                try:
+                                    foreign_value = float(foreign_text.replace(',', '').replace('+', ''))
+                                    # 네이버 금융은 주 단위로 표시하므로 만주로 변환
+                                    foreign_value = foreign_value / 10000  # 만주로 변환
+                                except ValueError:
+                                    pass
+                            
+                            # 합계에 추가
+                            if institutional_value is not None:
+                                institutional_net_sum += institutional_value
+                            if foreign_value is not None:
+                                foreign_net_sum += foreign_value
+                            
+                            count += 1
+                            if count >= 3:  # 최근 3거래일
+                                break
+                                
+                        except (ValueError, IndexError) as e:
+                            logger.debug(f"수급 데이터 파싱 실패 (행): {e}")
+                            continue
+                
+                if count > 0:
+                    # KRX API에서 이미 데이터를 가져온 경우 덮어쓰지 않음
+                    if result.get('foreign_net') is None:
+                        result['foreign_net'] = round(foreign_net_sum, 2)
+                    if result.get('institutional_net') is None:
+                        result['institutional_net'] = round(institutional_net_sum, 2)
+                    logger.debug(f"{ticker_code} 수급 데이터: 외인 {result['foreign_net']:.2f}만주, 기관 {result['institutional_net']:.2f}만주")
+                else:
+                    if result.get('foreign_net') is None and result.get('institutional_net') is None:
+                        logger.warning(f"{ticker_code}: 수급 데이터를 찾을 수 없음")
+                    
+            except Exception as e:
+                # KRX API에서 이미 데이터를 가져온 경우 경고 레벨 낮춤
+                if result.get('foreign_net') is None and result.get('institutional_net') is None:
+                    logger.warning(f"{ticker_code} 수급 데이터 수집 실패: {e}")
+                else:
+                    logger.debug(f"{ticker_code} 네이버 크롤링 실패 (KRX API 데이터 사용 중): {e}")
         
         # 2. ETF 괴리율 수집 (ETF인 경우만)
         try:

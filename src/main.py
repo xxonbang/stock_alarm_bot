@@ -174,6 +174,65 @@ def main():
         messages_sent = 0
         messages_failed = 0
         
+        # KRX API 상태 확인 및 경고 메시지 준비
+        krx_warning_message = None
+        try:
+            from src.crawler import get_krx_api_status, get_krx_api_expired_status
+            
+            # 401 오류 기반 만료 상태 확인 (유효기간 정보 없어도 작동)
+            api_expired = get_krx_api_expired_status()
+            
+            # 유효기간 정보 기반 상태 확인 (상세 정보용)
+            krx_status = get_krx_api_status()
+            
+            if api_expired:
+                # 401 오류 발생으로 인한 만료 추정
+                if krx_status.get('expired') or (krx_status.get('days_until_expiry') is not None and krx_status.get('days_until_expiry') <= 7):
+                    # 유효기간 정보가 있는 경우: 상세 메시지
+                    if krx_status.get('expired'):
+                        # 유효기간 만료
+                        expiry_date = krx_status.get('expiry_date')
+                        expiry_str = expiry_date.strftime('%Y년 %m월 %d일') if expiry_date else '알 수 없음'
+                        krx_warning_message = f"""<b>⚠️ KRX API 키 유효기간 만료 안내</b>
+
+KRX API 키의 유효기간이 만료되었습니다.
+만료일: {expiry_str}
+
+현재는 네이버 크롤링으로 데이터를 수집하고 있습니다.
+KRX Data Marketplace에서 새로운 인증키를 발급받아 주세요.
+
+🔗 https://openapi.krx.co.kr"""
+                    elif krx_status.get('days_until_expiry') is not None and krx_status.get('days_until_expiry') <= 7:
+                        # 7일 이내 만료 예정
+                        expiry_date = krx_status.get('expiry_date')
+                        days_left = krx_status.get('days_until_expiry')
+                        expiry_str = expiry_date.strftime('%Y년 %m월 %d일') if expiry_date else '알 수 없음'
+                        krx_warning_message = f"""<b>⚠️ KRX API 키 유효기간 만료 임박 안내</b>
+
+KRX API 키의 유효기간이 곧 만료됩니다.
+만료일: {expiry_str}
+남은 일수: {days_left}일
+
+만료 전에 KRX Data Marketplace에서 인증키를 갱신해 주세요.
+
+🔗 https://openapi.krx.co.kr"""
+                else:
+                    # 유효기간 정보가 없는 경우: 일반 경고 메시지
+                    krx_warning_message = f"""<b>⚠️ KRX API 키 인증 실패 안내</b>
+
+KRX API 호출 시 인증 오류가 발생했습니다.
+가능한 원인:
+• 인증키 유효기간 만료
+• API 이용 신청 미승인
+• 인증키 오류
+
+현재는 네이버 크롤링으로 데이터를 수집하고 있습니다.
+KRX Data Marketplace에서 인증키 상태를 확인하고 갱신해 주세요.
+
+🔗 https://openapi.krx.co.kr"""
+        except Exception as e:
+            logger.debug(f"KRX API 상태 확인 실패: {e}")
+        
         # 0. 바리케이트 메시지 전송 (이전 메시지 뭉치와 구분) - 일자 정보 포함
         barrier_message = f"""<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
 <b>🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧</b>
@@ -188,6 +247,15 @@ def main():
         else:
             messages_failed += 1
             logger.error("❌ 바리케이트 메시지 발송 실패")
+        
+        # KRX API 경고 메시지 발송 (있는 경우만)
+        if krx_warning_message:
+            if notifier.send_message(krx_warning_message):
+                messages_sent += 1
+                logger.info("✅ KRX API 경고 메시지 발송 성공")
+            else:
+                messages_failed += 1
+                logger.error("❌ KRX API 경고 메시지 발송 실패")
         
         # 1. 각 티커 카테고리별 메시지 전송
         category_order = [

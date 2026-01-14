@@ -68,6 +68,22 @@ class Settings:
         
         # 기본값은 01번 키 (하위 호환성)
         self.google_api_key = self.google_api_key_01
+        
+        # KRX API Key (optional, 없어도 기존 기능 동작)
+        self.krx_api_key = os.getenv('KRX_API_KEY', None)
+        
+        # KRX API 유효기간 (optional, 환경변수에서 로드)
+        # 형식: "YYYY-MM-DD" (예: "2027-01-12")
+        krx_expiry_str = os.getenv('KRX_API_KEY_EXPIRY', None)
+        self.krx_api_key_expiry = None
+        if krx_expiry_str:
+            try:
+                from datetime import datetime
+                self.krx_api_key_expiry = datetime.strptime(krx_expiry_str, '%Y-%m-%d').date()
+            except ValueError:
+                # logger가 아직 초기화되지 않았을 수 있으므로 print 사용
+                import sys
+                print(f"⚠️ KRX_API_KEY_EXPIRY 형식 오류: {krx_expiry_str} (YYYY-MM-DD 형식 필요)", file=sys.stderr)
     
     def __repr__(self):
         return f"Settings(tickers={len(self.tickers)}개, schedule_times={len(self.schedule_times)}개)"
