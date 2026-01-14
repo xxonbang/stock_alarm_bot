@@ -238,6 +238,90 @@ def calculate_ma_deviation(current_price: float, ma20: Optional[float]) -> Optio
         return None
 
 
+def calculate_pullback_status(hist_data: pd.DataFrame) -> Optional[str]:
+    """
+    눌림목(Pullback) 판별 로직
+    
+    상승 추세 중 일시적 조정 구간을 찾아 매수 적기인지 판별합니다.
+    
+    Args:
+        hist_data: 주가/거래량 데이터 (최소 60일치 필요)
+    
+    Returns:
+        '눌림목 발생(강력)': 4대 조건 모두 만족
+        '조정 중': 일부 조건 만족
+        '해당 없음': 조건 미충족
+        None: 데이터 부족 또는 계산 실패
+    """
+    try:
+        if hist_data.empty or len(hist_data) < 60:
+            logger.debug("눌림목 판별: 데이터 부족 (최소 60일 필요)")
+            return None
+        
+        # Close와 Volume 데이터 추출
+        closes = hist_data['Close']
+        volumes = hist_data['Volume'] if 'Volume' in hist_data.columns else None
+        
+        if volumes is None or volumes.isna().all():
+            logger.debug("눌림목 판별: 거래량 데이터 없음")
+            # 거래량 없이도 나머지 조건은 체크 가능
+        
+        current_price = float(closes.iloc[-1])
+        
+        # 1. 상승 추세 확인 (MA5 > MA20 > MA60 정배열)
+        ma5 = closes.rolling(window=5).mean()
+        ma20 = closes.rolling(window=20).mean()
+        ma60 = closes.rolling(window=60).mean()
+        
+        if len(closes) < 60:
+            return None
+        
+        ma5_current = float(ma5.iloc[-1])
+        ma20_current = float(ma20.iloc[-1])
+        ma60_current = float(ma60.iloc[-1])
+        
+        # 정배열 확인
+        uptrend = (ma5_current > ma20_current > ma60_current)
+        
+        # 2. 조정 폭 확인 (최근 10거래일 최고점 대비 현재가가 -5% ~ -15% 범위)
+        recent_10_days = closes.iloc[-10:]
+        recent_high = float(recent_10_days.max())
+        retracement_pct = ((current_price - recent_high) / recent_high) * 100
+        
+        retracement_ok = (-15.0 <= retracement_pct <= -5.0)
+        
+        # 3. 지지선 확인 (현재가가 MA20의 100% ~ 103% 사이)
+        ma20_ratio = (current_price / ma20_current) * 100 if ma20_current > 0 else None
+        support_ok = (ma20_ratio is not None and 100.0 <= ma20_ratio <= 103.0)
+        
+        # 4. 거래량 확인 (당일 거래량이 최근 5거래일 평균의 60% 이하)
+        volume_ok = False
+        if volumes is not None and not volumes.isna().all():
+            try:
+                current_volume = float(volumes.iloc[-1])
+                recent_5_avg_volume = float(volumes.iloc[-5:].mean())
+                
+                if recent_5_avg_volume > 0:
+                    volume_ratio = (current_volume / recent_5_avg_volume) * 100
+                    volume_ok = (volume_ratio <= 60.0)
+            except (ValueError, IndexError) as e:
+                logger.debug(f"눌림목 판별: 거래량 계산 실패 - {e}")
+        
+        # 조건 합산
+        conditions_met = sum([uptrend, retracement_ok, support_ok, volume_ok])
+        
+        if conditions_met == 4:
+            return '눌림목 발생(강력)'
+        elif conditions_met >= 2:
+            return '조정 중'
+        else:
+            return '해당 없음'
+    
+    except Exception as e:
+        logger.error(f"눌림목 판별 실패: {e}")
+        return None
+
+
 def calculate_advanced_indicators(ticker: str, hist_data: Optional[pd.DataFrame] = None) -> Dict[str, Optional[float]]:
     """
     고급 기술적 지표 계산 (20일 이격도, 52주 신고가 위치)
@@ -312,13 +396,13 @@ def get_technical_indicators(ticker: str) -> Dict[str, Optional[float]]:
         if stock is None:
             return {'rsi': None, 'ma20': None, 'ma_deviation': None}
         
-        # 최소 30일치 데이터 필요 (RSI 14일 + MA 20일 + 여유)
+        # 최소 60일치 데이터 필요 (RSI 14일 + MA 20일 + MA 60일(눌림목) + 여유)
         # 배당/분할 반영을 위해 auto_adjust=True 사용
-        hist = stock.history(period="2mo", auto_adjust=True)
+        hist = stock.history(period="3mo", auto_adjust=True)
         
         if hist.empty or len(hist) < 30:
             logger.warning(f"{ticker}: 기술적 지표 계산을 위한 데이터 부족 ({len(hist)}일)")
-            return {'rsi': None, 'ma20': None, 'ma_deviation': None}
+            return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None}
         
         # Close 가격 사용
         closes = hist['Close']
@@ -336,16 +420,20 @@ def get_technical_indicators(ticker: str) -> Dict[str, Optional[float]]:
         # 고급 지표 추가
         advanced = calculate_advanced_indicators(ticker, hist)
         
+        # 눌림목 판별
+        pullback_status = calculate_pullback_status(hist)
+        
         return {
             'rsi': rsi,
             'ma20': ma20,
             'ma_deviation': ma_deviation,
             'ma_disparity': advanced.get('ma_disparity'),
-            'year_high_pos': advanced.get('year_high_pos')
+            'year_high_pos': advanced.get('year_high_pos'),
+            'pullback_status': pullback_status
         }
     except Exception as e:
         logger.error(f"{ticker} 기술적 지표 계산 실패: {e}")
-        return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None}
+        return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None}
 
 
 def calculate_returns(ticker: str) -> Dict:
@@ -369,7 +457,8 @@ def calculate_returns(ticker: str) -> Dict:
                 'ma20': 20일 이동평균선,
                 'ma_deviation': 20일 이동평균선 괴리율 (%),
                 'ma_disparity': 20일 이격도 (%),
-                'year_high_pos': 52주 신고가 대비 위치 (%)
+                'year_high_pos': 52주 신고가 대비 위치 (%),
+                'pullback_status': 눌림목 판별 결과
             },
             'supply_demand': {
                 'foreign': 외국인 순매매량 (만 주),
@@ -697,6 +786,7 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 ma_deviation = technical.get('ma_deviation')
                 ma_disparity = technical.get('ma_disparity')
                 year_high_pos = technical.get('year_high_pos')
+                pullback_status = technical.get('pullback_status')
                 
                 if rsi is not None:
                     rsi_status = ""
@@ -719,6 +809,12 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 
                 if year_high_pos is not None:
                     technical_parts.append(f"52주 위치: {year_high_pos:.1f}%")
+                
+                if pullback_status is not None:
+                    if pullback_status == '눌림목 발생(강력)':
+                        technical_parts.append(f"눌림목: {pullback_status} ⚠️")
+                    else:
+                        technical_parts.append(f"눌림목: {pullback_status}")
                 
                 if technical_parts:
                     technical_str = " | ".join(technical_parts)
