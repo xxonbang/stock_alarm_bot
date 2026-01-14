@@ -404,6 +404,19 @@ def get_technical_indicators(ticker: str) -> Dict[str, Optional[float]]:
             logger.warning(f"{ticker}: 기술적 지표 계산을 위한 데이터 부족 ({len(hist)}일)")
             return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None}
         
+        # 데이터 정합성 체크
+        # High >= Low, Close가 High/Low 범위 내 확인
+        invalid_rows = []
+        for idx in hist.index:
+            high = hist.loc[idx, 'High']
+            low = hist.loc[idx, 'Low']
+            close = hist.loc[idx, 'Close']
+            if high < low or close < low or close > high:
+                invalid_rows.append(idx)
+        
+        if invalid_rows:
+            logger.warning(f"{ticker}: 데이터 정합성 문제 발견 ({len(invalid_rows)}일): High/Low/Close 값 비정상")
+        
         # Close 가격 사용
         closes = hist['Close']
         current_price = float(closes.iloc[-1])
@@ -623,6 +636,15 @@ def get_stock_summary_by_category(
     """
     logger.info("=== 주가 데이터 수집 및 요약 시작 (카테고리별) ===")
     
+    # KRX API 캐시 초기화 (새로운 실행마다 캐시 초기화)
+    try:
+        from src.crawler import _krx_api_cache, _krx_etf_api_cache
+        _krx_api_cache.clear()
+        _krx_etf_api_cache.clear()
+        logger.debug("KRX API 캐시 초기화 완료")
+    except Exception as e:
+        logger.debug(f"KRX API 캐시 초기화 실패 (정상 작동 계속): {e}")
+    
     # 카테고리별 결과 저장
     category_results = {}
     
@@ -745,13 +767,13 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                     # 한국 주식/ETF는 원화, 그 외는 달러
                     if 'KS' in ticker or 'KQ' in ticker:
                         # 한국 주식/ETF: 원화
-                        price_str = f"<b>{current_price:,.0f}원</b>"
+                        price_str = f"{current_price:,.0f}원"
                     else:
                         # 해외 주식/ETF/암호화폐: 달러
                         if current_price >= 1:
-                            price_str = f"<b>${current_price:,.2f}</b>"
+                            price_str = f"${current_price:,.2f}"
                         else:
-                            price_str = f"<b>${current_price:.4f}</b>"
+                            price_str = f"${current_price:.4f}"
                 else:
                     price_str = str(current_price)
                 
@@ -816,19 +838,19 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                     else:
                         technical_parts.append(f"눌림목: {pullback_status}")
                 
+                # 기술적 지표 포맷팅 (가독성 개선: 줄바꿈 사용)
                 if technical_parts:
-                    technical_str = " | ".join(technical_parts)
+                    technical_str = "\n   " + "\n   ".join(technical_parts)
                 else:
                     technical_str = "N/A"
                 
-                # 수급 데이터 및 ETF 괴리율 포맷팅
+                # 수급 데이터 및 ETF 괴리율 포맷팅 (가독성 개선: 줄바꿈 사용)
                 additional_info = []
                 supply_demand = result.get('supply_demand', {})
                 foreign_net = supply_demand.get('foreign')
                 institutional_net = supply_demand.get('institutional')
                 
                 if foreign_net is not None or institutional_net is not None:
-                    supply_str = "수급: "
                     supply_parts = []
                     if foreign_net is not None:
                         sign = "+" if foreign_net >= 0 else ""
@@ -837,7 +859,7 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                         sign = "+" if institutional_net >= 0 else ""
                         supply_parts.append(f"기관 {sign}{institutional_net:.2f}만주")
                     if supply_parts:
-                        additional_info.append(supply_str + " / ".join(supply_parts))
+                        additional_info.append("수급: " + " / ".join(supply_parts))
                 
                 disparity_rate = result.get('disparity_rate')
                 if disparity_rate is not None:
@@ -847,8 +869,8 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 if institutional_held is not None:
                     additional_info.append(f"기관 보유: {institutional_held:.2f}%")
                 
-                # 종목명과 티커명 강조 효과 (기술적 지표 및 추가 정보 포함)
-                summary_line = f"📊 <b>{ticker_name}</b> <code>({ticker})</code>\n   현재가: <b>{price_str}</b>\n   변동률:{returns_str}\n   기술적 지표: {technical_str}"
+                # 종목명과 티커명 강조 효과 (기술적 지표 및 추가 정보 포함, 가독성 개선)
+                summary_line = f"📊 <b>{ticker_name}</b> <code>({ticker})</code>\n   현재가: <b>{price_str}</b>\n   변동률:{returns_str}\n   기술적 지표:{technical_str}"
                 if additional_info:
                     summary_line += f"\n   추가 정보: {' | '.join(additional_info)}"
                 summary_parts.append(summary_line)
