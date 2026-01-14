@@ -389,37 +389,65 @@ def calculate_returns(ticker: str) -> Dict:
         'institutional_held': None
     }
     
-    # 현재가 조회
-    current_price = get_current_price(ticker)
-    if current_price is None:
+    # 날짜 불일치 문제 해결: 한 번의 데이터 조회로 현재가와 과거 가격을 모두 가져옴
+    try:
+        stock = get_stock_data(ticker)
+        if stock is None:
+            result['current_price'] = "데이터 없음"
+            return result
+        
+        # 1년치 데이터를 한 번에 가져와서 같은 데이터 소스 사용
+        # 배당/분할 반영을 위해 auto_adjust=True 사용
+        data = stock.history(period="1y", auto_adjust=True)
+        
+        if data.empty:
+            result['current_price'] = "데이터 없음"
+            return result
+        
+        # 현재가: 가장 최근 거래일의 종가
+        current_price = float(data['Close'].iloc[-1])
+        result['current_price'] = current_price
+        
+        # 기간별 수익률 계산 (거래일 기준, 실제 시장 기준과 일치하도록 조정)
+        # 참고: 1개월 = 약 20-22거래일, 1년 = 약 250거래일 (한국 시장 기준)
+        periods = {
+            '1D': 1,      # 1거래일 전
+            '3D': 3,      # 3거래일 전
+            '1W': 5,      # 1주일 = 약 5거래일 (기존 7에서 조정)
+            '1M': 20,     # 1개월 = 약 20거래일 (기존 30에서 조정)
+            '3M': 60,     # 3개월 = 약 60거래일 (기존 90에서 조정)
+            '6M': 120,    # 6개월 = 약 120거래일 (기존 180에서 조정)
+            '1Y': 250     # 1년 = 약 250거래일 (기존 365에서 조정)
+        }
+        
+        for period_name, days_ago in periods.items():
+            try:
+                # 같은 데이터 소스에서 과거 가격 추출
+                if len(data) <= days_ago:
+                    # 데이터가 충분하지 않으면 가장 오래된 데이터 사용
+                    logger.warning(f"{ticker}: {days_ago}거래일 전 데이터가 없어 가장 오래된 데이터 사용 ({len(data)}거래일)")
+                    past_price = float(data['Close'].iloc[0])
+                else:
+                    # 거래일 기준으로 정확한 인덱스 계산
+                    # data.index[-1] = 가장 최근 거래일
+                    # data.index[-2] = 1거래일 전
+                    # 따라서 data.index[-(days_ago+1)] = days_ago 거래일 전
+                    target_index = -(days_ago + 1)
+                    past_price = float(data['Close'].iloc[target_index])
+                
+                if past_price == 0:
+                    result['returns'][period_name] = "N/A"
+                else:
+                    return_pct = ((current_price - past_price) / past_price) * 100
+                    result['returns'][period_name] = round(return_pct, 2)
+            except Exception as e:
+                logger.error(f"{ticker} {period_name} 수익률 계산 실패: {e}")
+                result['returns'][period_name] = "오류"
+    
+    except Exception as e:
+        logger.error(f"{ticker} 데이터 조회 실패: {e}")
         result['current_price'] = "데이터 없음"
         return result
-    
-    result['current_price'] = current_price
-    
-    # 기간별 수익률 계산 (거래일 기준, 실제 시장 기준과 일치하도록 조정)
-    # 참고: 1개월 = 약 20-22거래일, 1년 = 약 250거래일 (한국 시장 기준)
-    periods = {
-        '1D': 1,      # 1거래일 전
-        '3D': 3,      # 3거래일 전
-        '1W': 5,      # 1주일 = 약 5거래일 (기존 7에서 조정)
-        '1M': 20,     # 1개월 = 약 20거래일 (기존 30에서 조정)
-        '3M': 60,     # 3개월 = 약 60거래일 (기존 90에서 조정)
-        '6M': 120,    # 6개월 = 약 120거래일 (기존 180에서 조정)
-        '1Y': 250     # 1년 = 약 250거래일 (기존 365에서 조정)
-    }
-    
-    for period_name, days in periods.items():
-        try:
-            past_price = get_historical_price(ticker, days)
-            if past_price is None or past_price == 0:
-                result['returns'][period_name] = "N/A"
-            else:
-                return_pct = ((current_price - past_price) / past_price) * 100
-                result['returns'][period_name] = round(return_pct, 2)
-        except Exception as e:
-            logger.error(f"{ticker} {period_name} 수익률 계산 실패: {e}")
-            result['returns'][period_name] = "오류"
     
     # 기술적 지표 계산
     technical = get_technical_indicators(ticker)
