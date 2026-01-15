@@ -39,8 +39,10 @@ except ImportError:
     settings = None
 try:
     import feedparser
+    FEEDPARSER_AVAILABLE = True
 except ImportError:
     feedparser = None
+    FEEDPARSER_AVAILABLE = False
 try:
     from fredapi import Fred
 except ImportError:
@@ -113,8 +115,8 @@ def get_krx_api_expired_status() -> bool:
 
 def get_yahoo_finance_news(max_items: int = 10) -> List[Dict]:
     """
-    yfinance 라이브러리를 사용하여 Yahoo Finance 뉴스 수집
-    웹 크롤링 대신 안정적인 API 사용
+    Yahoo Finance RSS 피드를 사용하여 일반 뉴스 수집
+    티커 기반이 아닌 RSS 피드에서 수집하여 포트폴리오와 무관한 Hot 뉴스 수집
     
     Args:
         max_items: 최대 수집할 뉴스 개수
@@ -124,47 +126,47 @@ def get_yahoo_finance_news(max_items: int = 10) -> List[Dict]:
     """
     news_items = []
     
-    # 시장을 대표하는 지수 티커 리스트 (시장 지수 및 주도주)
-    market_tickers = ['^GSPC', '^DJI', '^IXIC', 'NVDA', 'TSLA', 'AAPL']
-    
-    all_news = []
-    seen_titles = set()
+    if not FEEDPARSER_AVAILABLE:
+        logger.warning("feedparser가 설치되지 않음, Yahoo Finance RSS 수집 불가")
+        return []
     
     try:
-        logger.info(f"yfinance를 사용한 Yahoo Finance 뉴스 수집 시작 (티커: {len(market_tickers)}개)")
+        # Yahoo Finance RSS 피드 URL
+        rss_urls = [
+            "https://feeds.finance.yahoo.com/rss/2.0/headline",
+            "https://finance.yahoo.com/news/rss/",
+            "https://feeds.finance.yahoo.com/rss/2.0/headline?region=US&lang=en-US"
+        ]
         
-        for ticker in market_tickers:
+        all_news = []
+        seen_titles = set()
+        
+        for rss_url in rss_urls:
             try:
-                ticker_obj = yf.Ticker(ticker)
-                news_list = ticker_obj.news
+                logger.info(f"Yahoo Finance RSS 피드 수집 중: {rss_url}")
                 
-                if not news_list:
-                    logger.debug(f"{ticker}: 뉴스 없음")
+                response = _session.get(rss_url, headers=HEADERS, timeout=15)
+                response.raise_for_status()
+                
+                # feedparser로 RSS 파싱
+                feed = feedparser.parse(response.content)
+                
+                if not feed.entries:
+                    logger.debug(f"RSS 피드 항목 없음: {rss_url}")
                     continue
                 
-                logger.info(f"{ticker}: {len(news_list)}개 뉴스 발견")
+                logger.info(f"Yahoo Finance RSS 피드에서 {len(feed.entries)}개 항목 발견")
                 
-                for news_item in news_list:
+                for entry in feed.entries:
                     try:
-                        # yfinance 뉴스 구조: content.title, canonicalUrl.url, provider.displayName
-                        content = news_item.get('content', {})
-                        title = content.get('title', '') if isinstance(content, dict) else ''
+                        title = entry.get('title', '').strip()
+                        link = entry.get('link', '')
+                        summary = entry.get('summary', '') or entry.get('description', '')
                         
-                        # link 추출
-                        canonical_url = news_item.get('canonicalUrl', {})
-                        link = canonical_url.get('url', '') if isinstance(canonical_url, dict) else ''
-                        
-                        # publisher 추출
-                        provider = news_item.get('provider', {})
-                        publisher = provider.get('displayName', 'Yahoo Finance') if isinstance(provider, dict) else 'Yahoo Finance'
-                        
-                        # summary 추출 (있는 경우)
-                        summary = content.get('summary', '') if isinstance(content, dict) else ''
-                        
-                        if not title:
+                        if not title or len(title) < 20:
                             continue
                         
-                        # 중복 제거 (제목 기준)
+                        # 중복 제거
                         title_lower = title.lower().strip()
                         if title_lower in seen_titles:
                             continue
@@ -172,30 +174,28 @@ def get_yahoo_finance_news(max_items: int = 10) -> List[Dict]:
                         
                         all_news.append({
                             'title': title,
-                            'summary': summary[:200] if summary else "",  # 요약문 최대 200자
-                            'link': link,
-                            'publisher': publisher
+                            'summary': summary[:200] if summary else "",
+                            'link': link
                         })
                         
                         if len(all_news) >= max_items:
                             break
-                            
                     except Exception as e:
-                        logger.debug(f"뉴스 항목 파싱 실패 ({ticker}): {e}")
+                        logger.debug(f"RSS 항목 파싱 실패: {e}")
                         continue
-            
+                
                 if len(all_news) >= max_items:
                     break
-        
+                    
             except Exception as e:
-                logger.warning(f"{ticker} 뉴스 수집 실패: {e}")
+                logger.debug(f"RSS 피드 수집 실패 ({rss_url}): {e}")
                 continue
         
         news_items = all_news[:max_items]
-        logger.info(f"Yahoo Finance 뉴스 수집 완료: {len(news_items)}개 (yfinance 사용)")
+        logger.info(f"Yahoo Finance RSS 뉴스 수집 완료: {len(news_items)}개")
         
     except Exception as e:
-        logger.warning(f"Yahoo Finance 뉴스 수집 실패: {e}")
+        logger.warning(f"Yahoo Finance RSS 뉴스 수집 실패: {e}")
     
     return news_items
 
@@ -440,6 +440,169 @@ def get_market_news_with_context(max_items: int = 10) -> str:
     else:
         result = "**주요 시장 뉴스:**\n뉴스 데이터 수집 불가 (크롤링 실패 또는 네트워크 오류)"
         logger.warning("뉴스 수집 실패: 모든 소스에서 데이터를 가져올 수 없음")
+    
+    return result
+
+
+def get_hot_news(overseas_count: int = 10, domestic_count: int = 10) -> str:
+    """
+    해외시장과 국내시장에서 각각 Hot/인기 뉴스 수집 (포트폴리오 필터링 없음)
+    포트폴리오와 무관하지만 현재 화두가 되고 있는 뉴스를 수집하여 분석의 폭과 시야를 넓히는 것이 목적
+    
+    Args:
+        overseas_count: 해외시장 뉴스 개수 (기본값: 10개)
+        domestic_count: 국내시장 뉴스 개수 (기본값: 10개)
+    
+    Returns:
+        포맷팅된 Hot 뉴스 텍스트
+    """
+    logger.info("=== Hot/인기 뉴스 수집 시작 (포트폴리오 필터링 없음) ===")
+    
+    result_parts = []
+    selected_overseas = []
+    selected_domestic = []
+    
+    # 1. 해외시장 Hot 뉴스 수집 (RSS 피드 기반 또는 대안 방법)
+    try:
+        logger.info(f"해외시장 Hot 뉴스 수집 중 (목표: {overseas_count}개, 포트폴리오 무관)...")
+        
+        selected_overseas = []
+        
+        # 방법 1: RSS 피드를 사용한 해외 뉴스 수집 (Bloomberg, CNBC 등)
+        if FEEDPARSER_AVAILABLE:
+            # 글로벌 RSS 피드에서 수집
+            rss_news_list = get_global_rss_news(max_items_per_source=overseas_count // 3 + 1)
+            
+            # RSS 뉴스를 Dict 형태로 변환
+            for news_item in rss_news_list[:overseas_count]:
+                # "[Bloomberg] 제목 | 요약" 또는 "[Bloomberg] 제목" 형식을 파싱
+                if '] ' in news_item:
+                    source_part, rest = news_item.split('] ', 1)
+                    source = source_part.replace('[', '').strip()
+                    
+                    # summary가 있는지 확인 (| 구분자)
+                    if ' | ' in rest:
+                        title, summary = rest.split(' | ', 1)
+                        selected_overseas.append({
+                            'title': title.strip(),
+                            'summary': summary.strip()[:200],  # 최대 200자
+                            'link': '',
+                            'publisher': source
+                        })
+                    else:
+                        selected_overseas.append({
+                            'title': rest.strip(),
+                            'summary': '',
+                            'link': '',
+                            'publisher': source
+                        })
+                else:
+                    selected_overseas.append({
+                        'title': news_item.strip(),
+                        'summary': '',
+                        'link': '',
+                        'publisher': 'RSS Feed'
+                    })
+        
+        # 방법 2: feedparser가 없으면 Yahoo Finance RSS 시도
+        if not selected_overseas:
+            overseas_news = get_yahoo_finance_news(max_items=overseas_count)
+            selected_overseas = overseas_news if overseas_news else []
+        
+        # 방법 3: 여전히 부족하면 yfinance로 일반 시장 뉴스 수집 (티커 기반이지만 다양한 티커 사용)
+        if len(selected_overseas) < overseas_count:
+            logger.info(f"RSS 수집 부족 ({len(selected_overseas)}개), yfinance로 보완 시도...")
+            try:
+                # 다양한 시장 지수와 섹터 티커 사용 (포트폴리오 무관)
+                market_tickers = ['^GSPC', '^DJI', '^IXIC', '^VIX', '^TNX', 'GC=F', 'CL=F']
+                seen_titles = {item['title'].lower() for item in selected_overseas}
+                
+                for ticker in market_tickers:
+                    try:
+                        ticker_obj = yf.Ticker(ticker)
+                        news_list = ticker_obj.news
+                        
+                        if not news_list:
+                            continue
+                        
+                        for news_item in news_list[:3]:  # 각 티커당 최대 3개
+                            try:
+                                content = news_item.get('content', {})
+                                title = content.get('title', '') if isinstance(content, dict) else ''
+                                summary = content.get('summary', '') if isinstance(content, dict) else ''
+                                canonical_url = news_item.get('canonicalUrl', {})
+                                link = canonical_url.get('url', '') if isinstance(canonical_url, dict) else ''
+                                
+                                if not title or len(title) < 20:
+                                    continue
+                                
+                                title_lower = title.lower().strip()
+                                if title_lower in seen_titles:
+                                    continue
+                                seen_titles.add(title_lower)
+                                
+                                selected_overseas.append({
+                                    'title': title,
+                                    'summary': summary[:200] if summary else "",
+                                    'link': link
+                                })
+                                
+                                if len(selected_overseas) >= overseas_count:
+                                    break
+                            except:
+                                continue
+                        
+                        if len(selected_overseas) >= overseas_count:
+                            break
+                    except:
+                        continue
+            except Exception as e:
+                logger.debug(f"yfinance 보완 수집 실패: {e}")
+        
+        if selected_overseas:
+            result_parts.append("**🌎 해외시장 Hot 뉴스:**\n")
+            for i, news in enumerate(selected_overseas, 1):
+                result_parts.append(f"{i}. <b>{news['title']}</b>")
+                if news.get('summary'):
+                    result_parts.append(f"   요약: {news['summary']}")
+                result_parts.append("")
+            logger.info(f"해외시장 Hot 뉴스 수집 완료: {len(selected_overseas)}개")
+        else:
+            result_parts.append("**🌎 해외시장 Hot 뉴스:**\n뉴스 데이터 수집 불가")
+            logger.warning("해외시장 Hot 뉴스 수집 실패")
+    except Exception as e:
+        logger.warning(f"해외시장 Hot 뉴스 수집 실패: {e}")
+        result_parts.append("**🌎 해외시장 Hot 뉴스:**\n뉴스 데이터 수집 실패")
+    
+    result_parts.append("\n")
+    
+    # 2. 국내시장 Hot 뉴스 수집 (네이버 금융)
+    try:
+        logger.info(f"국내시장 Hot 뉴스 수집 중 (목표: {domestic_count}개, 포트폴리오 무관)...")
+        # 네이버 금융에서 인기 뉴스 수집 (필터링 없이)
+        domestic_news = get_naver_finance_news(max_items=domestic_count)
+        
+        # 수집된 뉴스 그대로 사용 (필터링 없이, 이미 상위 뉴스)
+        selected_domestic = domestic_news if domestic_news else []
+        
+        if selected_domestic:
+            result_parts.append("**🇰🇷 국내시장 Hot 뉴스:**\n")
+            for i, news in enumerate(selected_domestic, 1):
+                result_parts.append(f"{i}. <b>{news['title']}</b>")
+                if news.get('summary'):
+                    result_parts.append(f"   요약: {news['summary']}")
+                result_parts.append("")
+            logger.info(f"국내시장 Hot 뉴스 수집 완료: {len(selected_domestic)}개")
+        else:
+            result_parts.append("**🇰🇷 국내시장 Hot 뉴스:**\n뉴스 데이터 수집 불가")
+            logger.warning("국내시장 Hot 뉴스 수집 실패")
+    except Exception as e:
+        logger.warning(f"국내시장 Hot 뉴스 수집 실패: {e}")
+        result_parts.append("**🇰🇷 국내시장 Hot 뉴스:**\n뉴스 데이터 수집 실패")
+    
+    result = "\n".join(result_parts)
+    total_count = len(selected_overseas) + len(selected_domestic)
+    logger.info(f"Hot 뉴스 수집 완료: 총 {total_count}개 (해외 {len(selected_overseas)}개, 국내 {len(selected_domestic)}개)")
     
     return result
 
@@ -1423,7 +1586,7 @@ def get_global_rss_news(max_items_per_source: int = 3) -> List[str]:
     Returns:
         뉴스 헤드라인 리스트 (형식: "[소스명] 헤드라인")
     """
-    if feedparser is None:
+    if not FEEDPARSER_AVAILABLE:
         logger.warning("feedparser가 설치되지 않음, RSS 피드 수집 불가")
         return []
     
@@ -1456,7 +1619,20 @@ def get_global_rss_news(max_items_per_source: int = 3) -> List[str]:
                 try:
                     title = entry.get('title', '').strip()
                     if title and len(title) >= 20:  # 20자 이상만 필터링
-                        news_list.append(f"[{source}] {title}")
+                        # RSS 피드에서 summary/description 추출 시도
+                        summary = entry.get('summary', '') or entry.get('description', '')
+                        # HTML 태그 제거 (간단한 처리)
+                        if summary:
+                            from bs4 import BeautifulSoup
+                            try:
+                                summary = BeautifulSoup(summary, 'html.parser').get_text(strip=True)
+                            except:
+                                pass
+                        # summary가 있으면 포함, 없으면 제목만
+                        if summary:
+                            news_list.append(f"[{source}] {title} | {summary[:150]}")
+                        else:
+                            news_list.append(f"[{source}] {title}")
                         count += 1
                 except Exception as e:
                     logger.debug(f"{source} 항목 파싱 실패: {e}")
@@ -1625,15 +1801,25 @@ def translate_headlines(headlines_text: str) -> str:
                         title = match.group(2).strip()
                         headlines_data.append((number, title))
         
+        # Hot 뉴스인지 일반 뉴스인지 확인
+        is_hot_news = "해외시장 Hot 뉴스" in headlines_text or "국내시장 Hot 뉴스" in headlines_text
+        
         if not headlines_data:
             # 포맷팅만 적용
-            if not headlines_text.startswith("<b>📰"):
-                return f"<b>📰 주요 시장 뉴스 (제목+요약)</b>\n{headlines_text}"
+            if is_hot_news:
+                if not headlines_text.startswith("<b>🔥"):
+                    return f"<b>🔥 Hot/인기 뉴스</b>\n{headlines_text}"
+            else:
+                if not headlines_text.startswith("<b>📰"):
+                    return f"<b>📰 주요 시장 뉴스 (제목+요약)</b>\n{headlines_text}"
             return headlines_text
         
         # 최종 결과 포맷팅
         formatted_lines = []
-        formatted_lines.append("<b>📰 주요 시장 뉴스 (제목+요약)</b>\n")
+        if is_hot_news:
+            formatted_lines.append("<b>🔥 Hot/인기 뉴스</b>\n")
+        else:
+            formatted_lines.append("<b>📰 주요 시장 뉴스 (제목+요약)</b>\n")
         
         # 원본 뉴스 텍스트에서 요약 정보도 함께 가져오기
         original_lines = headlines_text.split('\n')

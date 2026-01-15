@@ -32,7 +32,8 @@ from src.crawler import (
     get_us_top_movers,
     get_korea_hot_themes,
     get_hankyung_consensus,
-    get_google_news_rss
+    get_google_news_rss,
+    get_hot_news
 )
 from src.analysis import get_tradingview_technical_summary
 from src.ai_researcher import create_researcher
@@ -124,6 +125,17 @@ def main():
         news_formatted = translate_headlines(news_with_context)
         logger.info("뉴스 포맷팅 완료")
         
+        # Step 4-1: Hot/인기 뉴스 수집 (포트폴리오 필터링 없음)
+        # 포트폴리오와 무관하지만 현재 화두가 되고 있는 뉴스를 수집하여 분석의 폭과 시야를 넓히는 것이 목적
+        logger.info("\n[Step 4-1] Hot/인기 뉴스 수집 시작 (해외 10개, 국내 10개)...")
+        hot_news = get_hot_news(overseas_count=10, domestic_count=10)
+        logger.info("Hot/인기 뉴스 수집 완료")
+        
+        # Step 4-2: Hot 뉴스 포맷팅 및 번역
+        logger.info("\n[Step 4-2] Hot 뉴스 포맷팅 및 번역 시작...")
+        hot_news_formatted = translate_headlines(hot_news)
+        logger.info("Hot 뉴스 포맷팅 및 번역 완료")
+        
         # Step 5: 수집된 데이터 통합 (AI 분석용)
         logger.info("\n[Step 5] 수집된 데이터 통합 (AI 분석용)...")
         # AI 분석을 위해 모든 카테고리 메시지를 합침
@@ -148,7 +160,10 @@ def main():
 {tradingview_signals}
 
 [NEWS_DATA]
-{news_formatted}"""
+{news_formatted}
+
+[HOT_NEWS]
+{hot_news_formatted}"""
         logger.info(f"통합 데이터 준비 완료: {len(collected_data)}자")
         
         # Step 6: AI 초기화 (리포트 생성용)
@@ -299,6 +314,19 @@ KRX Data Marketplace에서 인증키 상태를 확인하고 갱신해 주세요.
         else:
             messages_failed += 1
             logger.error("❌ 주요 시장 뉴스 메시지 발송 실패")
+        
+        # 3-1. Hot/인기 뉴스 메시지 전송
+        hot_news_formatted_html = hot_news_formatted.replace("**🌎 해외시장 Hot 뉴스:**", "<b>🔥 해외시장 Hot 뉴스</b>")
+        hot_news_formatted_html = hot_news_formatted_html.replace("**🇰🇷 국내시장 Hot 뉴스:**", "<b>🔥 국내시장 Hot 뉴스</b>")
+        if not hot_news_formatted_html.startswith("<b>"):
+            hot_news_formatted_html = f"<b>🔥 Hot/인기 뉴스</b>\n{hot_news_formatted_html}"
+        hot_news_message = hot_news_formatted_html
+        if notifier.send_message(hot_news_message):
+            messages_sent += 1
+            logger.info("✅ Hot/인기 뉴스 메시지 발송 성공")
+        else:
+            messages_failed += 1
+            logger.error("❌ Hot/인기 뉴스 메시지 발송 실패")
         
         # 4. AI 투자 인사이트 메시지 전송
         ai_briefing_html = f"<b>🤖 AI 투자 인사이트</b>\n{ai_briefing}"
