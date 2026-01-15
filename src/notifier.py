@@ -37,11 +37,39 @@ class TelegramNotifier:
         # 텔레그램 메시지 최대 길이: 4096자
         max_length = 4096
         
+        # HTML 파싱 모드인 경우 지원되지 않는 태그 제거
+        if parse_mode == "HTML":
+            text = self._clean_html_tags(text)
+        
         if len(text) <= max_length:
-            return self._send_single_message(text, parse_mode)
+            # 먼저 단일 메시지로 시도
+            success = self._send_single_message(text, parse_mode)
+            # 400 오류로 실패했고 메시지가 충분히 길면 분할 시도
+            if not success and len(text) > 3000:
+                logger.info(f"단일 메시지 발송 실패, 분할 발송으로 재시도: {len(text)}자")
+                return self._send_split_messages(text, parse_mode)
+            return success
         else:
             # 메시지가 길면 분할 발송
             return self._send_split_messages(text, parse_mode)
+    
+    def _clean_html_tags(self, text: str) -> str:
+        """텔레그램에서 지원하지 않는 HTML 태그 제거"""
+        import re
+        
+        # 텔레그램이 지원하는 HTML 태그만 허용
+        # 지원 태그: <b>, <i>, <u>, <s>, <code>, <pre>, <a>
+        # 지원하지 않는 태그 제거: <body>, <p>, <div>, <span>, <html> 등
+        
+        # 지원하지 않는 태그 제거 (태그와 내용은 유지)
+        unsupported_tags = ['body', 'p', 'div', 'span', 'html', 'head', 'title', 'meta', 'link', 'script', 'style']
+        for tag in unsupported_tags:
+            # 여는 태그 제거
+            text = re.sub(rf'<{tag}[^>]*>', '', text, flags=re.IGNORECASE)
+            # 닫는 태그 제거
+            text = re.sub(rf'</{tag}>', '', text, flags=re.IGNORECASE)
+        
+        return text
     
     def _send_single_message(self, text: str, parse_mode: str) -> bool:
         """단일 메시지 발송"""
@@ -57,31 +85,117 @@ class TelegramNotifier:
             response.raise_for_status()
             logger.info("텔레그램 메시지 발송 성공")
             return True
+        except requests.exceptions.HTTPError as e:
+            # 400 Bad Request 오류인 경우 메시지 길이 또는 HTML 파싱 문제일 수 있음
+            if response.status_code == 400:
+                error_detail = response.text
+                logger.warning(f"400 Bad Request 오류 발생: {error_detail[:200]}")
+                # 메시지가 너무 길거나 HTML 파싱 오류인 경우 분할 시도
+                if len(text) > 3000:  # 충분히 긴 메시지인 경우
+                    logger.info(f"메시지가 길어서 분할 발송 시도: {len(text)}자")
+                    return False  # False를 반환하여 상위에서 분할 처리하도록
+            logger.error(f"텔레그램 메시지 발송 실패: {e}")
+            return False
         except Exception as e:
             logger.error(f"텔레그램 메시지 발송 실패: {e}")
             return False
     
     def _send_split_messages(self, text: str, parse_mode: str) -> bool:
-        """긴 메시지를 분할하여 발송"""
+        """긴 메시지를 분할하여 발송 (HTML 태그 고려)"""
         max_length = 4096
+        # 헤더 공간 확보 (분할 헤더 + 여유 공간)
+        header_length = 50  # "<b>(1/3)</b>\n\n" 형태
+        chunk_size = max_length - header_length - 100  # 안전 마진
+        
         parts = []
         
-        # 메시지를 4000자 단위로 분할 (여유 공간 확보)
-        chunk_size = 4000
-        for i in range(0, len(text), chunk_size):
-            chunk = text[i:i + chunk_size]
-            parts.append(chunk)
+        if parse_mode == "HTML":
+            # HTML 태그를 고려한 스마트 분할
+            parts = self._split_html_message(text, chunk_size)
+        else:
+            # 일반 텍스트 분할
+            for i in range(0, len(text), chunk_size):
+                chunk = text[i:i + chunk_size]
+                parts.append(chunk)
         
         success = True
         for i, part in enumerate(parts):
-            part_text = f"<b>[{i+1}/{len(parts)}]</b>\n\n{part}"
-            if not self._send_single_message(part_text, parse_mode):
-                success = False
-            # 연속 발송 방지를 위한 짧은 대기
-            import time
-            time.sleep(1)
+            # 분할 헤더 추가 (간단한 형식)
+            part_text = f"<b>({i+1}/{len(parts)})</b>\n\n{part}"
+            
+            # 최종 길이 확인
+            if len(part_text) > max_length:
+                logger.warning(f"분할 메시지 {i+1}이 여전히 너무 깁니다 ({len(part_text)}자). 추가 분할 시도...")
+                # 추가 분할 필요
+                sub_parts = self._split_html_message(part, chunk_size - header_length) if parse_mode == "HTML" else [part[j:j+chunk_size-header_length] for j in range(0, len(part), chunk_size-header_length)]
+                for j, sub_part in enumerate(sub_parts):
+                    sub_part_text = f"<b>({i+1}-{j+1}/{len(parts)})</b>\n\n{sub_part}"
+                    if not self._send_single_message(sub_part_text, parse_mode):
+                        success = False
+                    import time
+                    time.sleep(1)
+            else:
+                if not self._send_single_message(part_text, parse_mode):
+                    success = False
+                # 연속 발송 방지를 위한 짧은 대기
+                import time
+                time.sleep(1)
         
         return success
+    
+    def _split_html_message(self, text: str, chunk_size: int) -> List[str]:
+        """HTML 태그를 고려한 메시지 분할 (줄 단위 분할로 HTML 태그 보존)"""
+        import re
+        
+        parts = []
+        current_chunk = ""
+        current_length = 0
+        
+        # 줄 단위로 분할 (HTML 태그가 줄 단위로 완성되도록)
+        lines = text.split('\n')
+        
+        for line in lines:
+            line_with_newline = line + '\n'
+            line_length = len(line_with_newline)
+            
+            # 현재 청크에 추가할 수 있는지 확인
+            if current_length + line_length > chunk_size and current_chunk:
+                # 현재 청크 저장
+                parts.append(current_chunk.rstrip())
+                # 새 청크 시작
+                current_chunk = line_with_newline
+                current_length = line_length
+            else:
+                current_chunk += line_with_newline
+                current_length += line_length
+        
+        # 마지막 청크 추가
+        if current_chunk:
+            parts.append(current_chunk.rstrip())
+        
+        # 각 청크의 HTML 유효성 검증 및 수정
+        validated_parts = []
+        for part in parts:
+            # 열린 태그와 닫힌 태그 개수 확인
+            open_tags = re.findall(r'<([^/>][^>]*)>', part)
+            close_tags = re.findall(r'</([^>]+)>', part)
+            
+            # 주요 태그만 추적 (b, i, u, code, pre 등)
+            major_tags = ['b', 'i', 'u', 'code', 'pre', 'strong', 'em']
+            open_major = [tag.split()[0] for tag in open_tags if tag.split()[0] in major_tags]
+            close_major = [tag.split()[0] for tag in close_tags if tag.split()[0] in major_tags]
+            
+            # 열린 태그가 더 많으면 닫기
+            if len(open_major) > len(close_major):
+                diff = len(open_major) - len(close_major)
+                # 열린 순서의 역순으로 닫기
+                tags_to_close = open_major[-diff:]
+                for tag in reversed(tags_to_close):
+                    part += f'</{tag}>'
+            
+            validated_parts.append(part)
+        
+        return validated_parts if validated_parts else [text]
     
     def format_stock_report(self, analysis_results: List[Dict]) -> str:
         """
