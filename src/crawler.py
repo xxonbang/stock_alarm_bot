@@ -69,8 +69,6 @@ HEADERS = {
     "Referer": "https://www.google.com/"
 }
 
-logger = logging.getLogger(__name__)
-
 # curl_cffi Session 생성 (브라우저 의태로 TLS 차단 우회)
 def _create_session():
     """
@@ -1745,10 +1743,6 @@ def get_google_news_rss() -> str:
         return result
 
 
-# 제거됨: main.py에서 사용되지 않음 (get_market_news_with_context 사용)
-# def get_market_headlines(max_items: int = 10) -> str:
-
-
 def is_korean_text(text: str) -> bool:
     """
     텍스트가 한국어인지 판단
@@ -2287,34 +2281,35 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
     try:
         from config.settings import settings
         if settings.krx_api_key:
-            # 1-1. 수급 데이터 수집 (유가증권 일별매매정보 API)
-            # 주의: 유가증권 일별매매정보 API는 ETF에 대해 외인/기관 순매매량을 제공하지 않음
-            # ETF인 경우 바로 네이버 크롤링으로 fallback
-            # 일반 주식인 경우에만 KRX API 시도
+            # 1-1. ETF 판별 및 데이터 수집 (최적화: 한 번의 호출로 판별과 데이터 수집 통합)
+            # ETF 일별매매정보 API로 먼저 확인 (ETF면 데이터가 있음)
+            # 주의: 일반 주식도 ETF API를 호출하면 데이터가 반환될 수 있으므로,
+            # ISU_CD와 종목명을 확인하여 실제 ETF인지 검증 필요
             is_etf = False
+            etf_data = None
+            
             try:
-                # ETF 일별매매정보 API로 먼저 확인 (ETF면 데이터가 있음)
-                # 주의: 일반 주식도 ETF API를 호출하면 데이터가 반환될 수 있으므로,
-                # ISU_CD와 종목명을 확인하여 실제 ETF인지 검증 필요
-                etf_test = get_etf_data_krx_api(ticker_code, settings.krx_api_key)
-                if etf_test.get('disparity_rate') is not None:
+                # ETF 일별매매정보 API 호출 (한 번만 호출하여 판별과 데이터 수집 동시 수행)
+                etf_data = get_etf_data_krx_api(ticker_code, settings.krx_api_key)
+                if etf_data.get('disparity_rate') is not None:
                     # ETF인지 확인: NAV가 있고 괴리율이 합리적인 범위(-10% ~ +10%) 내에 있어야 함
                     # 일반 주식은 NAV가 없거나 괴리율이 비정상적으로 클 수 있음
-                    nav = etf_test.get('nav')
-                    disparity = etf_test.get('disparity_rate')
+                    nav = etf_data.get('nav')
+                    disparity = etf_data.get('disparity_rate')
                     if nav and nav > 0 and disparity is not None and -10 <= disparity <= 10:
                         is_etf = True
-                        # ETF인 경우 거래량도 함께 저장
-                        if etf_test.get('total_volume') is not None:
-                            result['total_volume'] = etf_test.get('total_volume')
+                        # ETF 데이터 저장 (괴리율, 거래량) - 한 번의 호출로 모든 데이터 수집
+                        result['disparity_rate'] = etf_data.get('disparity_rate')
+                        if etf_data.get('total_volume') is not None:
+                            result['total_volume'] = etf_data.get('total_volume')
                         logger.debug(f"{ticker_code}: ETF로 확인됨 (NAV={nav:,.0f}, 괴리율={disparity:.2f}%), 유가증권 일별매매정보 API 스킵")
                     else:
                         logger.debug(f"{ticker_code}: ETF API 응답이 있지만 일반 주식으로 판단 (NAV={nav}, 괴리율={disparity})")
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"{ticker_code}: ETF API 호출 실패 (일반 주식일 가능성): {e}")
             
+            # 일반 주식인 경우에만 유가증권 일별매매정보 API 호출 (수급 데이터 수집)
             if not is_etf:
-                # 일반 주식인 경우에만 유가증권 일별매매정보 API 시도
                 try:
                     krx_data = get_kr_stock_data_krx_api(ticker_code, settings.krx_api_key)
                     # KRX API에서 데이터를 성공적으로 가져온 경우
@@ -2322,33 +2317,11 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                         result['foreign_net'] = krx_data.get('foreign_net')
                         result['institutional_net'] = krx_data.get('institutional_net')
                         logger.debug(f"{ticker_code}: KRX API로 수급 데이터 수집 성공")
-                    # 거래량도 함께 저장
+                    # 거래량도 함께 저장 (ETF가 아닌 경우)
                     if krx_data.get('total_volume') is not None:
                         result['total_volume'] = krx_data.get('total_volume')
                 except Exception as e:
                     logger.debug(f"{ticker_code}: KRX API 수급 데이터 실패, 네이버 크롤링으로 대체: {e}")
-            
-            # 1-2. ETF 괴리율 수집 (ETF 일별매매정보 API)
-            # 주의: 일반 주식은 ETF가 아니므로 NAV 괴리율을 수집하지 않아야 함
-            # ETF 판별이 완료된 후에만 ETF 괴리율 수집
-            # 또한 ETF API에서 티커 매칭이 실패하면 일반 주식으로 간주
-            if is_etf:
-                try:
-                    etf_data = get_etf_data_krx_api(ticker_code, settings.krx_api_key)
-                    if etf_data.get('disparity_rate') is not None:
-                        # ETF 판별 로직 재확인: 괴리율이 합리적인 범위인지 확인
-                        nav = etf_data.get('nav')
-                        disparity = etf_data.get('disparity_rate')
-                        if nav and nav > 0 and disparity is not None and -10 <= disparity <= 10:
-                            result['disparity_rate'] = etf_data.get('disparity_rate')
-                            logger.debug(f"{ticker_code}: KRX API로 ETF 괴리율 수집 성공 ({result['disparity_rate']:.2f}%)")
-                        else:
-                            logger.debug(f"{ticker_code}: ETF API 응답이 있지만 일반 주식으로 판단, NAV 괴리율 수집 안 함 (NAV={nav}, 괴리율={disparity})")
-                    # ETF 거래량도 함께 저장 (이미 저장되었을 수 있지만 재확인)
-                    if etf_data.get('total_volume') is not None:
-                        result['total_volume'] = etf_data.get('total_volume')
-                except Exception as e:
-                    logger.debug(f"{ticker_code}: KRX API ETF 괴리율 실패, 네이버 크롤링으로 대체: {e}")
             else:
                 logger.debug(f"{ticker_code}: 일반 주식으로 확인됨, ETF 괴리율 수집 스킵")
     except (ImportError, AttributeError) as e:

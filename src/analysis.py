@@ -377,12 +377,13 @@ def calculate_advanced_indicators(ticker: str, hist_data: Optional[pd.DataFrame]
         return result
 
 
-def get_technical_indicators(ticker: str) -> Dict[str, Optional[float]]:
+def get_technical_indicators(ticker: str, hist_data: Optional[pd.DataFrame] = None) -> Dict[str, Optional[float]]:
     """
     기술적 지표 계산 (RSI, 20일 이동평균선, 괴리율)
     
     Args:
         ticker: 주식 티커 심볼
+        hist_data: 이미 가져온 히스토리 데이터 (Optional, 있으면 재호출 안 함)
     
     Returns:
         {
@@ -392,30 +393,53 @@ def get_technical_indicators(ticker: str) -> Dict[str, Optional[float]]:
         }
     """
     try:
-        stock = get_stock_data(ticker)
-        if stock is None:
-            return {'rsi': None, 'ma20': None, 'ma_deviation': None}
-        
-        # 최소 60일치 데이터 필요 (RSI 14일 + MA 20일 + MA 60일(눌림목) + 여유)
-        # 배당/분할 반영을 위해 auto_adjust=True 사용
-        hist = stock.history(period="3mo", auto_adjust=True)
+        # 이미 데이터가 제공된 경우 재호출하지 않음 (중복 호출 방지)
+        if hist_data is not None and not hist_data.empty:
+            hist = hist_data
+        else:
+            stock = get_stock_data(ticker)
+            if stock is None:
+                return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None}
+            
+            # 최소 60일치 데이터 필요 (RSI 14일 + MA 20일 + MA 60일(눌림목) + 여유)
+            # 배당/분할 반영을 위해 auto_adjust=True 사용
+            # 1년치 데이터를 가져와서 필요한 기간만 사용 (calculate_returns와 동일한 데이터 소스)
+            hist = stock.history(period="1y", auto_adjust=True)
         
         if hist.empty or len(hist) < 30:
             logger.warning(f"{ticker}: 기술적 지표 계산을 위한 데이터 부족 ({len(hist)}일)")
             return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None}
         
-        # 데이터 정합성 체크
+        # 데이터 정합성 체크 및 문제 행 제외
         # High >= Low, Close가 High/Low 범위 내 확인
         invalid_rows = []
         for idx in hist.index:
-            high = hist.loc[idx, 'High']
-            low = hist.loc[idx, 'Low']
-            close = hist.loc[idx, 'Close']
-            if high < low or close < low or close > high:
+            try:
+                high = hist.loc[idx, 'High']
+                low = hist.loc[idx, 'Low']
+                close = hist.loc[idx, 'Close']
+                
+                # None 또는 NaN 체크
+                if pd.isna(high) or pd.isna(low) or pd.isna(close):
+                    invalid_rows.append(idx)
+                    continue
+                
+                # 정합성 검증
+                if high < low or close < low or close > high or high <= 0 or low <= 0 or close <= 0:
+                    invalid_rows.append(idx)
+            except (KeyError, IndexError) as e:
+                logger.debug(f"{ticker} 데이터 정합성 체크 실패 (행: {idx}): {e}")
                 invalid_rows.append(idx)
         
         if invalid_rows:
-            logger.warning(f"{ticker}: 데이터 정합성 문제 발견 ({len(invalid_rows)}일): High/Low/Close 값 비정상")
+            logger.warning(f"{ticker}: 데이터 정합성 문제 발견 ({len(invalid_rows)}일): High/Low/Close 값 비정상, 문제 행 제외")
+            # 문제가 있는 행 제외
+            hist = hist.drop(invalid_rows)
+            
+            # 데이터가 너무 적어지면 계산 불가
+            if hist.empty or len(hist) < 20:
+                logger.warning(f"{ticker}: 정합성 문제 행 제외 후 데이터 부족 ({len(hist)}일)")
+                return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None}
         
         # Close 가격 사용
         closes = hist['Close']
@@ -430,8 +454,8 @@ def get_technical_indicators(ticker: str) -> Dict[str, Optional[float]]:
         # 괴리율 계산
         ma_deviation = calculate_ma_deviation(current_price, ma20)
         
-        # 고급 지표 추가
-        advanced = calculate_advanced_indicators(ticker, hist)
+        # 고급 지표 추가 (이미 가져온 데이터 재사용)
+        advanced = calculate_advanced_indicators(ticker, hist_data=hist)
         
         # 눌림목 판별
         pullback_status = calculate_pullback_status(hist)
@@ -551,11 +575,18 @@ def calculate_returns(ticker: str) -> Dict:
                     target_index = -(days_ago + 1)
                     past_price = float(data['Close'].iloc[target_index])
                 
-                if past_price == 0:
+                # None 체크 및 유효성 검증 강화
+                if past_price is None or pd.isna(past_price) or past_price <= 0:
+                    result['returns'][period_name] = "N/A"
+                elif current_price is None or pd.isna(current_price) or current_price <= 0:
                     result['returns'][period_name] = "N/A"
                 else:
-                    return_pct = ((current_price - past_price) / past_price) * 100
-                    result['returns'][period_name] = round(return_pct, 2)
+                    try:
+                        return_pct = ((current_price - past_price) / past_price) * 100
+                        result['returns'][period_name] = round(return_pct, 2)
+                    except (ZeroDivisionError, ValueError, TypeError) as e:
+                        logger.warning(f"{ticker} {period_name} 수익률 계산 오류: {e}")
+                        result['returns'][period_name] = "오류"
             except Exception as e:
                 logger.error(f"{ticker} {period_name} 수익률 계산 실패: {e}")
                 result['returns'][period_name] = "오류"
@@ -565,8 +596,8 @@ def calculate_returns(ticker: str) -> Dict:
         result['current_price'] = "데이터 없음"
         return result
     
-    # 기술적 지표 계산
-    technical = get_technical_indicators(ticker)
+    # 기술적 지표 계산 (이미 가져온 데이터 재사용하여 중복 호출 방지)
+    technical = get_technical_indicators(ticker, hist_data=data)
     result['technical'] = technical
     
     # 국내 주식인 경우 수급 데이터, ETF 괴리율, 거래량 수집
@@ -575,14 +606,28 @@ def calculate_returns(ticker: str) -> Dict:
             from src.crawler import get_kr_stock_data
             kr_data = get_kr_stock_data(ticker)
             if kr_data:
-                result['supply_demand']['foreign'] = kr_data.get('foreign_net')
-                result['supply_demand']['institutional'] = kr_data.get('institutional_net')
-                result['disparity_rate'] = kr_data.get('disparity_rate')
+                # None 체크 강화
+                foreign_net = kr_data.get('foreign_net')
+                institutional_net = kr_data.get('institutional_net')
+                disparity_rate = kr_data.get('disparity_rate')
+                total_volume = kr_data.get('total_volume')
+                
+                if foreign_net is not None:
+                    result['supply_demand']['foreign'] = foreign_net
+                if institutional_net is not None:
+                    result['supply_demand']['institutional'] = institutional_net
+                if disparity_rate is not None:
+                    result['disparity_rate'] = disparity_rate
+                
                 # KRX API 거래량이 있으면 우선 사용 (yfinance보다 정확)
-                if kr_data.get('total_volume') is not None and kr_data.get('total_volume') > 0:
-                    # KRX API는 주 단위로 반환하므로 만주로 변환
-                    result['total_volume'] = float(kr_data.get('total_volume')) / 10000.0
-                    logger.debug(f"{ticker} KRX API 거래량 사용: {result['total_volume']:.2f}만주")
+                if total_volume is not None and isinstance(total_volume, (int, float)) and total_volume > 0:
+                    try:
+                        # KRX API는 주 단위로 반환하므로 만주로 변환
+                        result['total_volume'] = float(total_volume) / 10000.0
+                        logger.debug(f"{ticker} KRX API 거래량 사용: {result['total_volume']:.2f}만주")
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"{ticker} 거래량 변환 실패: {e}")
+                        # 변환 실패 시 기존 yfinance 값 유지
         except Exception as e:
             logger.debug(f"{ticker} 국내 주식 데이터 수집 실패: {e}")
     
@@ -964,6 +1009,8 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
     return category_messages
 
 
+# 제거 예정: get_stock_summary_by_category()로 대체되어 사용되지 않음
+# main.py에서 get_stock_summary_by_category()를 사용하므로 이 함수는 더 이상 필요 없음
 def get_stock_summary(tickers: List[str]) -> str:
     """
     주가 데이터를 수집하고 요약 텍스트로 변환
