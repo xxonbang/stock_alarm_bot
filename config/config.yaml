@@ -37,7 +37,6 @@ tickers_interest_overseas: #관심주식_해외
 
 # 알림 시간 설정 (로깅용, 실제 스케줄은 GitHub Actions에서 관리)
 schedule_times:
-  - "09:00 KST"
+  - "08:00 KST"
   - "13:00 KST"
-  - "18:00 KST"
   - "22:00 KST"
