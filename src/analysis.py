@@ -511,7 +511,8 @@ def calculate_returns(ticker: str) -> Dict:
         current_price = float(data['Close'].iloc[-1])
         result['current_price'] = current_price
         
-        # 전체 거래량: 가장 최근 거래일의 거래량 (Volume)
+        # 전체 거래량: yfinance에서 먼저 수집 (기본값)
+        # KRX API 거래량은 아래에서 국내 주식 데이터 수집 시 함께 가져옴
         if 'Volume' in data.columns:
             latest_volume = data['Volume'].iloc[-1]
             if pd.notna(latest_volume) and latest_volume > 0:
@@ -568,7 +569,7 @@ def calculate_returns(ticker: str) -> Dict:
     technical = get_technical_indicators(ticker)
     result['technical'] = technical
     
-    # 국내 주식인 경우 수급 데이터 및 ETF 괴리율 수집
+    # 국내 주식인 경우 수급 데이터, ETF 괴리율, 거래량 수집
     if '.KS' in ticker or '.KQ' in ticker:
         try:
             from src.crawler import get_kr_stock_data
@@ -577,6 +578,11 @@ def calculate_returns(ticker: str) -> Dict:
                 result['supply_demand']['foreign'] = kr_data.get('foreign_net')
                 result['supply_demand']['institutional'] = kr_data.get('institutional_net')
                 result['disparity_rate'] = kr_data.get('disparity_rate')
+                # KRX API 거래량이 있으면 우선 사용 (yfinance보다 정확)
+                if kr_data.get('total_volume') is not None and kr_data.get('total_volume') > 0:
+                    # KRX API는 주 단위로 반환하므로 만주로 변환
+                    result['total_volume'] = float(kr_data.get('total_volume')) / 10000.0
+                    logger.debug(f"{ticker} KRX API 거래량 사용: {result['total_volume']:.2f}만주")
         except Exception as e:
             logger.debug(f"{ticker} 국내 주식 데이터 수집 실패: {e}")
     
@@ -832,7 +838,7 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 # 주요 기간 수익률 추출 (1주, 1개월) - 라벨 포함
                 period_mapping = {
                     '1W': '1주',
-                    '1M': '1월'
+                    '1M': '1개월'
                 }
                 
                 main_returns = []
@@ -858,12 +864,12 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 
                 # RSI: R55 형식
                 if rsi is not None:
-                    technical_parts.append(f"<code>R{int(rsi)}</code>")
+                    technical_parts.append(f"<code>RSI:{int(rsi)}</code>")
                 
                 # 이격도: D101 형식 (ma_deviation 우선)
                 deviation_value = ma_deviation if ma_deviation is not None else ma_disparity
                 if deviation_value is not None:
-                    technical_parts.append(f"<code>D{int(deviation_value)}</code>")
+                    technical_parts.append(f"<code>이격:{int(deviation_value)}</code>")
                 
                 # 52주 위치: 52주:98% 형식
                 year_high_pos = technical.get('year_high_pos')
