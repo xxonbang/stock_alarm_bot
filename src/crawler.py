@@ -1932,7 +1932,8 @@ def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optio
         {
             'foreign_net': 외국인 순매매량 (만 주, 최근 3거래일 합계),
             'institutional_net': 기관 순매매량 (만 주, 최근 3거래일 합계),
-            'disparity_rate': None (이 API는 수급 데이터만 제공)
+            'disparity_rate': None (이 API는 수급 데이터만 제공),
+            'total_volume': 전체 거래량 (주 단위, ACC_TRDVOL, 최근 거래일)
         }
     """
     result = {
@@ -1959,76 +1960,106 @@ def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optio
             # 주의: 실제 API 엔드포인트와 파라미터는 KRX API 명세서 확인 필요
             url = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd"
             
-            # 종목 코드를 KRX 형식으로 변환 (예: '005930' -> 'KR7000010008')
-            # 실제 변환 로직은 KRX API 명세서 참고 필요
-            # 여기서는 일반적인 형식으로 시도
-            isu_cd = f"KR{code.zfill(10)}"  # 임시 변환 (실제는 명세서 확인 필요)
+            # 종목 코드를 KRX 형식으로 변환
+            # 유가증권 API는 티커 코드를 그대로 사용하거나 KR 형식으로 변환 필요
+            # 여러 형식 시도: 1) KR + 10자리 패딩, 2) 티커 코드 그대로
+            isu_cd_formats = [
+                code,  # 티커 코드 그대로 (005930)
+                f"KR{code.zfill(10)}",  # KR0000005930
+            ]
             
-            params = {
-                "basDd": date,
-                "isuCd": isu_cd
-            }
             headers = {
                 "AUTH_KEY": api_key
             }
             
-            try:
-                response = _session.get(url, params=params, headers=headers, timeout=5)  # 짧은 타임아웃
+            # 여러 형식으로 시도
+            success = False
+            for isu_cd in isu_cd_formats:
+                params = {
+                    "basDd": date,
+                    "isuCd": isu_cd
+                }
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    # 응답 데이터 파싱 (실제 응답 구조는 KRX API 명세서 확인 필요)
-                    # 예상 구조: {'OutBlock_1': [{'외국인순매수': value, '기관순매수': value, ...}]}
-                    if 'OutBlock_1' in data and len(data['OutBlock_1']) > 0:
-                        row = data['OutBlock_1'][0]
-                        # 컬럼명은 실제 API 응답에 맞게 수정 필요
-                        foreign_value = float(row.get('외국인순매수', 0) or row.get('FRGN_NTBY_QTY', 0) or 0)
-                        inst_value = float(row.get('기관순매수', 0) or row.get('ORG_NTBY_QTY', 0) or 0)
+                try:
+                    response = _session.get(url, params=params, headers=headers, timeout=5)  # 짧은 타임아웃
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        # 응답 데이터 파싱 (실제 응답 구조는 KRX API 명세서 확인 필요)
+                        # 예상 구조: {'OutBlock_1': [{'외국인순매수': value, '기관순매수': value, ...}]}
+                        if 'OutBlock_1' in data and len(data['OutBlock_1']) > 0:
+                            row = data['OutBlock_1'][0]
+                            
+                            # 응답된 ISU_CD가 요청한 티커 코드와 일치하는지 확인
+                            response_isu_cd = str(row.get('ISU_CD', '')).strip()
+                            response_isu_nm = str(row.get('ISU_NM', '')).strip()
+                            
+                            # 티커 코드가 ISU_CD에 포함되거나, ISU_CD 끝부분이 티커 코드와 일치하는지 확인
+                            if code in response_isu_cd or response_isu_cd.endswith(code) or response_isu_cd == code:
+                                # 컬럼명은 실제 API 응답에 맞게 수정 필요
+                                foreign_value = float(row.get('외국인순매수', 0) or row.get('FRGN_NTBY_QTY', 0) or 0)
+                                inst_value = float(row.get('기관순매수', 0) or row.get('ORG_NTBY_QTY', 0) or 0)
+                                
+                                # 거래량 추출 (ACC_TRDVOL) - 최근 거래일만 저장
+                                if count == 0:  # 첫 번째(최근) 거래일의 거래량만 저장
+                                    volume_str = row.get('ACC_TRDVOL') or row.get('거래량') or None
+                                    if volume_str:
+                                        try:
+                                            volume_value = float(str(volume_str).replace(',', ''))
+                                            if volume_value > 0:
+                                                result['total_volume'] = volume_value
+                                        except (ValueError, TypeError):
+                                            pass
+                                
+                                # 주 수로 변환 (이미 주 단위일 수 있음, 명세서 확인 필요)
+                                foreign_sum += foreign_value
+                                institutional_sum += inst_value
+                                count += 1
+                                success = True
+                                break  # 성공하면 다른 형식 시도하지 않음
+                    elif response.status_code == 401:
+                        # 401 오류 발생 시 유효기간 체크 및 만료 상태 설정
+                        global _krx_api_expired, _krx_api_expiry_checked
                         
-                        # 주 수로 변환 (이미 주 단위일 수 있음, 명세서 확인 필요)
-                        foreign_sum += foreign_value
-                        institutional_sum += inst_value
-                        count += 1
-                elif response.status_code == 401:
-                    # 401 오류 발생 시 유효기간 체크 및 만료 상태 설정
-                    global _krx_api_expired, _krx_api_expiry_checked
-                    
-                    # 유효기간 정보가 있으면 상세 체크
-                    if not _krx_api_expiry_checked:
-                        try:
-                            from config.settings import settings
-                            from datetime import date
-                            
-                            # 유효기간 정보가 있으면 체크
-                            if settings.krx_api_key_expiry:
-                                today = date.today()
-                                if today > settings.krx_api_key_expiry:
-                                    _krx_api_expired = True
-                                    logger.warning(f"⚠️ KRX API 키 유효기간이 만료되었습니다! (만료일: {settings.krx_api_key_expiry})")
-                                elif (settings.krx_api_key_expiry - today).days <= 7:
-                                    # 7일 이내 만료 예정
-                                    _krx_api_expired = True  # 만료 임박도 경고 대상
-                                    logger.warning(f"⚠️ KRX API 키 유효기간이 곧 만료됩니다! (만료일: {settings.krx_api_key_expiry}, 남은 일수: {(settings.krx_api_key_expiry - today).days}일)")
-                            
-                            _krx_api_expiry_checked = True
-                        except Exception as e:
-                            logger.debug(f"KRX API 유효기간 체크 실패: {e}")
-                    
-                    # 유효기간 정보가 없어도 401 오류 발생 시 만료로 간주
-                    if not _krx_api_expired:
-                        _krx_api_expired = True
-                        logger.warning(f"⚠️ KRX API 인증 실패 (401): 인증키 만료 또는 API 이용 신청 미승인으로 추정")
-                    
-                    logger.warning(f"KRX API 인증 실패 (401): 인증키 또는 API 이용 신청 확인 필요")
-                    break
-                else:
-                    logger.debug(f"KRX API 호출 실패: {response.status_code}, {response.text[:100]}")
-                    # 일부 실패는 무시하고 계속 시도
+                        # 유효기간 정보가 있으면 상세 체크
+                        if not _krx_api_expiry_checked:
+                            try:
+                                from config.settings import settings
+                                from datetime import date
+                                
+                                # 유효기간 정보가 있으면 체크
+                                if settings.krx_api_key_expiry:
+                                    today = date.today()
+                                    if today > settings.krx_api_key_expiry:
+                                        _krx_api_expired = True
+                                        logger.warning(f"⚠️ KRX API 키 유효기간이 만료되었습니다! (만료일: {settings.krx_api_key_expiry})")
+                                    elif (settings.krx_api_key_expiry - today).days <= 7:
+                                        # 7일 이내 만료 예정
+                                        _krx_api_expired = True  # 만료 임박도 경고 대상
+                                        logger.warning(f"⚠️ KRX API 키 유효기간이 곧 만료됩니다! (만료일: {settings.krx_api_key_expiry}, 남은 일수: {(settings.krx_api_key_expiry - today).days}일)")
+                                
+                                _krx_api_expiry_checked = True
+                            except Exception as e:
+                                logger.debug(f"KRX API 유효기간 체크 실패: {e}")
+                        
+                        # 유효기간 정보가 없어도 401 오류 발생 시 만료로 간주
+                        if not _krx_api_expired:
+                            _krx_api_expired = True
+                            logger.warning(f"⚠️ KRX API 인증 실패 (401): 인증키 만료 또는 API 이용 신청 미승인으로 추정")
+                        
+                        logger.warning(f"KRX API 인증 실패 (401): 인증키 또는 API 이용 신청 확인 필요")
+                        break  # 401 오류면 루프 종료
+                    else:
+                        logger.debug(f"KRX API 호출 실패: {response.status_code}, {response.text[:100]}")
+                        # 일부 실패는 무시하고 계속 시도
+                        continue
+                except Exception as e:
+                    logger.debug(f"유가증권 API 호출 실패 (형식: {isu_cd}): {e}")
                     continue
-                    
-            except Exception as e:
-                logger.debug(f"KRX API 호출 중 오류 (날짜: {date}): {e}")
-                continue
+            
+            if success:
+                # 성공한 경우 다음 날짜로 진행하지 않고 현재 날짜에서 완료
+                break
         
         if count > 0:
             # 만주로 변환 (API가 주 단위로 반환한다고 가정)
@@ -2056,13 +2087,15 @@ def get_etf_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optional[f
         {
             'disparity_rate': ETF 괴리율 (NAV 대비 %, 계산됨),
             'nav': NAV (순자산가치),
-            'closing_price': 종가 (시장가)
+            'closing_price': 종가 (시장가),
+            'total_volume': 전체 거래량 (주 단위, ACC_TRDVOL)
         }
     """
     result = {
         'disparity_rate': None,
         'nav': None,
-        'closing_price': None
+        'closing_price': None,
+        'total_volume': None  # ACC_TRDVOL (거래량)
     }
     
     # .KS, .KQ 제거하여 순수 코드만 추출
@@ -2087,9 +2120,9 @@ def get_etf_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optional[f
                     "AUTH_KEY": api_key,
                     "Content-Type": "application/json"
                 }
+                # API 스펙: basDd만 파라미터로 받음, 모든 ETF 데이터 반환
                 params = {
-                    "basDd": bas_dd,
-                    "isuCd": code
+                    "basDd": bas_dd
                 }
                 
                 logger.debug(f"ETF 일별매매정보 API 호출: {url}, basDd={bas_dd}, isuCd={code}")
@@ -2098,18 +2131,59 @@ def get_etf_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optional[f
                 if response.status_code == 200:
                     data = response.json()
                     
-                    # OutBlock_1에서 데이터 추출
+                    # OutBlock_1에서 해당 티커 코드의 데이터 찾기
+                    target_row = None
                     if 'OutBlock_1' in data and len(data['OutBlock_1']) > 0:
-                        row = data['OutBlock_1'][0]
+                        # 티커 코드로 필터링
+                        # 주의: ISU_CD는 티커 코드와 다를 수 있으므로 여러 방법으로 매칭 시도
+                        for row in data['OutBlock_1']:
+                            isu_cd = str(row.get('ISU_CD', '')).strip()
+                            isu_nm = str(row.get('ISU_NM', '')).strip()
+                            
+                            # 방법 1: ISU_CD가 티커 코드와 정확히 일치
+                            if isu_cd == code:
+                                target_row = row
+                                break
+                            
+                            # 방법 2: ISU_CD 끝부분이 티커 코드와 일치 (예: 0069M0 -> 379810은 아니지만 시도)
+                            if isu_cd.endswith(code) or code in isu_cd:
+                                target_row = row
+                                break
+                            
+                            # 방법 3: 종목명으로 매칭 (티커 코드 기반 종목명 패턴)
+                            # 379810 -> 나스닥, 390390 -> 반도체 등
+                            if code == '379810' and ('나스닥' in isu_nm or 'NASDAQ' in isu_nm.upper()):
+                                target_row = row
+                                break
+                            elif code == '390390' and ('반도체' in isu_nm or 'SEMI' in isu_nm.upper()):
+                                target_row = row
+                                break
                         
-                        # NAV와 종가 추출
+                        # 일치하는 항목이 없으면 None 반환 (일반 주식일 가능성)
+                        if target_row is None:
+                            logger.debug(f"{ticker_code}: ETF API에서 티커 매칭 실패, 일반 주식일 가능성 (ETF 데이터 없음)")
+                            return result  # None 반환
+                    
+                    if target_row:
+                        row = target_row
+                        
+                        # NAV, 종가, 거래량 추출
                         nav_str = row.get('NAV') or row.get('순자산가치') or None
                         closing_price_str = row.get('TDD_CLSPRC') or row.get('종가') or None
+                        volume_str = row.get('ACC_TRDVOL') or row.get('거래량') or None
                         
                         if nav_str and closing_price_str:
                             try:
                                 nav_value = float(str(nav_str).replace(',', ''))
                                 closing_price = float(str(closing_price_str).replace(',', ''))
+                                
+                                # 거래량 추출 (ACC_TRDVOL)
+                                volume_value = None
+                                if volume_str:
+                                    try:
+                                        volume_value = float(str(volume_str).replace(',', ''))
+                                    except (ValueError, TypeError):
+                                        pass
                                 
                                 if nav_value > 0 and closing_price > 0:
                                     # 괴리율 계산: ((종가 - NAV) / NAV) * 100
@@ -2118,8 +2192,10 @@ def get_etf_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optional[f
                                     result['disparity_rate'] = round(disparity_rate, 2)
                                     result['nav'] = nav_value
                                     result['closing_price'] = closing_price
+                                    if volume_value is not None and volume_value > 0:
+                                        result['total_volume'] = volume_value
                                     
-                                    logger.debug(f"{ticker_code} ETF 데이터 (KRX API): NAV={nav_value:,.0f}, 종가={closing_price:,.0f}, 괴리율={result['disparity_rate']:.2f}%")
+                                    logger.debug(f"{ticker_code} ETF 데이터 (KRX API): NAV={nav_value:,.0f}, 종가={closing_price:,.0f}, 괴리율={result['disparity_rate']:.2f}%, 거래량={volume_value or 'N/A'}")
                                     return result
                             except (ValueError, TypeError) as e:
                                 logger.debug(f"ETF 데이터 파싱 실패 (날짜: {bas_dd}): {e}")
@@ -2200,7 +2276,8 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
     result = {
         'foreign_net': None,
         'institutional_net': None,
-        'disparity_rate': None
+        'disparity_rate': None,
+        'total_volume': None  # ACC_TRDVOL (거래량)
     }
     
     # .KS, .KQ 제거하여 순수 코드만 추출
@@ -2211,31 +2288,81 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
         from config.settings import settings
         if settings.krx_api_key:
             # 1-1. 수급 데이터 수집 (유가증권 일별매매정보 API)
+            # 주의: 유가증권 일별매매정보 API는 ETF에 대해 외인/기관 순매매량을 제공하지 않음
+            # ETF인 경우 바로 네이버 크롤링으로 fallback
+            # 일반 주식인 경우에만 KRX API 시도
+            is_etf = False
             try:
-                krx_data = get_kr_stock_data_krx_api(ticker_code, settings.krx_api_key)
-                # KRX API에서 데이터를 성공적으로 가져온 경우
-                if krx_data.get('foreign_net') is not None or krx_data.get('institutional_net') is not None:
-                    result['foreign_net'] = krx_data.get('foreign_net')
-                    result['institutional_net'] = krx_data.get('institutional_net')
-                    logger.debug(f"{ticker_code}: KRX API로 수급 데이터 수집 성공")
-            except Exception as e:
-                logger.debug(f"{ticker_code}: KRX API 수급 데이터 실패, 네이버 크롤링으로 대체: {e}")
+                # ETF 일별매매정보 API로 먼저 확인 (ETF면 데이터가 있음)
+                # 주의: 일반 주식도 ETF API를 호출하면 데이터가 반환될 수 있으므로,
+                # ISU_CD와 종목명을 확인하여 실제 ETF인지 검증 필요
+                etf_test = get_etf_data_krx_api(ticker_code, settings.krx_api_key)
+                if etf_test.get('disparity_rate') is not None:
+                    # ETF인지 확인: NAV가 있고 괴리율이 합리적인 범위(-10% ~ +10%) 내에 있어야 함
+                    # 일반 주식은 NAV가 없거나 괴리율이 비정상적으로 클 수 있음
+                    nav = etf_test.get('nav')
+                    disparity = etf_test.get('disparity_rate')
+                    if nav and nav > 0 and disparity is not None and -10 <= disparity <= 10:
+                        is_etf = True
+                        # ETF인 경우 거래량도 함께 저장
+                        if etf_test.get('total_volume') is not None:
+                            result['total_volume'] = etf_test.get('total_volume')
+                        logger.debug(f"{ticker_code}: ETF로 확인됨 (NAV={nav:,.0f}, 괴리율={disparity:.2f}%), 유가증권 일별매매정보 API 스킵")
+                    else:
+                        logger.debug(f"{ticker_code}: ETF API 응답이 있지만 일반 주식으로 판단 (NAV={nav}, 괴리율={disparity})")
+            except:
+                pass
+            
+            if not is_etf:
+                # 일반 주식인 경우에만 유가증권 일별매매정보 API 시도
+                try:
+                    krx_data = get_kr_stock_data_krx_api(ticker_code, settings.krx_api_key)
+                    # KRX API에서 데이터를 성공적으로 가져온 경우
+                    if krx_data.get('foreign_net') is not None or krx_data.get('institutional_net') is not None:
+                        result['foreign_net'] = krx_data.get('foreign_net')
+                        result['institutional_net'] = krx_data.get('institutional_net')
+                        logger.debug(f"{ticker_code}: KRX API로 수급 데이터 수집 성공")
+                    # 거래량도 함께 저장
+                    if krx_data.get('total_volume') is not None:
+                        result['total_volume'] = krx_data.get('total_volume')
+                except Exception as e:
+                    logger.debug(f"{ticker_code}: KRX API 수급 데이터 실패, 네이버 크롤링으로 대체: {e}")
             
             # 1-2. ETF 괴리율 수집 (ETF 일별매매정보 API)
-            try:
-                etf_data = get_etf_data_krx_api(ticker_code, settings.krx_api_key)
-                if etf_data.get('disparity_rate') is not None:
-                    result['disparity_rate'] = etf_data.get('disparity_rate')
-                    logger.debug(f"{ticker_code}: KRX API로 ETF 괴리율 수집 성공 ({result['disparity_rate']:.2f}%)")
-            except Exception as e:
-                logger.debug(f"{ticker_code}: KRX API ETF 괴리율 실패, 네이버 크롤링으로 대체: {e}")
+            # 주의: 일반 주식은 ETF가 아니므로 NAV 괴리율을 수집하지 않아야 함
+            # ETF 판별이 완료된 후에만 ETF 괴리율 수집
+            # 또한 ETF API에서 티커 매칭이 실패하면 일반 주식으로 간주
+            if is_etf:
+                try:
+                    etf_data = get_etf_data_krx_api(ticker_code, settings.krx_api_key)
+                    if etf_data.get('disparity_rate') is not None:
+                        # ETF 판별 로직 재확인: 괴리율이 합리적인 범위인지 확인
+                        nav = etf_data.get('nav')
+                        disparity = etf_data.get('disparity_rate')
+                        if nav and nav > 0 and disparity is not None and -10 <= disparity <= 10:
+                            result['disparity_rate'] = etf_data.get('disparity_rate')
+                            logger.debug(f"{ticker_code}: KRX API로 ETF 괴리율 수집 성공 ({result['disparity_rate']:.2f}%)")
+                        else:
+                            logger.debug(f"{ticker_code}: ETF API 응답이 있지만 일반 주식으로 판단, NAV 괴리율 수집 안 함 (NAV={nav}, 괴리율={disparity})")
+                    # ETF 거래량도 함께 저장 (이미 저장되었을 수 있지만 재확인)
+                    if etf_data.get('total_volume') is not None:
+                        result['total_volume'] = etf_data.get('total_volume')
+                except Exception as e:
+                    logger.debug(f"{ticker_code}: KRX API ETF 괴리율 실패, 네이버 크롤링으로 대체: {e}")
+            else:
+                logger.debug(f"{ticker_code}: 일반 주식으로 확인됨, ETF 괴리율 수집 스킵")
     except (ImportError, AttributeError) as e:
         logger.debug(f"KRX API 설정 확인 실패 (정상, 기존 방식 사용): {e}")
     
     try:
         # 1. 수급 데이터 수집 (외인/기관 순매매량)
-        # KRX API에서 이미 데이터를 가져온 경우 스킵
-        if result.get('foreign_net') is None and result.get('institutional_net') is None:
+        # KRX API에서 이미 데이터를 가져온 경우 스킵 (단, 0.0이 아닌 경우만)
+        # KRX API가 0.0을 반환하면 네이버 크롤링으로 fallback
+        krx_has_data = (
+            (result.get('foreign_net') is not None and result.get('foreign_net') != 0.0) or
+            (result.get('institutional_net') is not None and result.get('institutional_net') != 0.0)
+        )
+        if not krx_has_data:
             try:
                 url = f"https://finance.naver.com/item/frgn.naver?code={code}"
                 logger.debug(f"수급 데이터 수집 중: {url}")
@@ -2277,14 +2404,17 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                             headers = header_row.select('th, td')
                             header_texts = [h.get_text(strip=True) for h in headers]
                             
-                            # 컬럼 인덱스 찾기
+                            # 컬럼 인덱스 찾기 (헤더에서 직접 찾기)
                             for i, header_text in enumerate(header_texts):
-                                if '기관' in header_text and '순매매' in table_text:
+                                header_text_clean = header_text.strip()
+                                # 기관 컬럼 찾기
+                                if '기관' in header_text_clean and institutional_col_idx is None:
                                     institutional_col_idx = i
-                                elif ('외국인' in header_text or '외인' in header_text) and '순매매' in table_text:
+                                # 외국인 컬럼 찾기
+                                elif ('외국인' in header_text_clean or '외인' in header_text_clean) and foreign_col_idx is None:
                                     foreign_col_idx = i
                             
-                            # 순매매량 컬럼이 모두 찾아졌으면 이 테이블 사용
+                            # 순매매량 컬럼이 하나라도 찾아졌으면 이 테이블 사용
                             if institutional_col_idx is not None or foreign_col_idx is not None:
                                 target_table = table
                                 logger.debug(f"수급 테이블 발견: 기관={institutional_col_idx}, 외인={foreign_col_idx}")
@@ -2302,10 +2432,10 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                             data_start_idx = 2  # 서브헤더 행 스킵
                     
                     # 최근 3거래일 데이터 추출
-                    for row in rows[data_start_idx:data_start_idx + 5]:  # 최근 5개 행 확인
+                    for row in rows[data_start_idx:data_start_idx + 10]:  # 최근 10개 행 확인 (여유 있게)
                         try:
                             tds = row.select('td, th')
-                            if len(tds) < 5:
+                            if len(tds) < max(institutional_col_idx or 0, foreign_col_idx or 0) + 1:
                                 continue
                             
                             # 날짜 확인 (첫 번째 컬럼)
@@ -2317,48 +2447,66 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                             institutional_value = None
                             if institutional_col_idx is not None and institutional_col_idx < len(tds):
                                 institutional_text = tds[institutional_col_idx].get_text(strip=True)
+                                # 서브헤더 행인지 확인 (순매매량, 보유주수 등이 포함된 행은 스킵)
+                                if '순매매량' in institutional_text or '보유주수' in institutional_text or '보유율' in institutional_text:
+                                    continue
+                                
                                 try:
-                                    # 숫자 추출 (쉼표, +, - 제거)
-                                    institutional_value = float(institutional_text.replace(',', '').replace('+', ''))
-                                    # 네이버 금융은 주 단위로 표시하므로 만주로 변환
-                                    institutional_value = institutional_value / 10000  # 만주로 변환
-                                except ValueError:
+                                    # 숫자 추출 (쉼표, +, - 제거, 괄호 제거)
+                                    institutional_text_clean = institutional_text.replace(',', '').replace('+', '').replace('(', '').replace(')', '').strip()
+                                    if institutional_text_clean and institutional_text_clean != '-':
+                                        institutional_value = float(institutional_text_clean)
+                                        # 네이버 금융은 주 단위로 표시하므로 만주로 변환
+                                        institutional_value = institutional_value / 10000  # 만주로 변환
+                                except (ValueError, AttributeError):
                                     pass
                             
                             # 외국인 순매매량 추출
                             foreign_value = None
                             if foreign_col_idx is not None and foreign_col_idx < len(tds):
                                 foreign_text = tds[foreign_col_idx].get_text(strip=True)
+                                # 서브헤더 행인지 확인
+                                if '순매매량' in foreign_text or '보유주수' in foreign_text or '보유율' in foreign_text:
+                                    continue
+                                
                                 try:
-                                    foreign_value = float(foreign_text.replace(',', '').replace('+', ''))
-                                    # 네이버 금융은 주 단위로 표시하므로 만주로 변환
-                                    foreign_value = foreign_value / 10000  # 만주로 변환
-                                except ValueError:
+                                    # 숫자 추출 (쉼표, +, - 제거, 괄호 제거)
+                                    foreign_text_clean = foreign_text.replace(',', '').replace('+', '').replace('(', '').replace(')', '').strip()
+                                    if foreign_text_clean and foreign_text_clean != '-':
+                                        foreign_value = float(foreign_text_clean)
+                                        # 네이버 금융은 주 단위로 표시하므로 만주로 변환
+                                        foreign_value = foreign_value / 10000  # 만주로 변환
+                                except (ValueError, AttributeError):
                                     pass
                             
-                            # 합계에 추가
+                            # 합계에 추가 (값이 있는 경우만)
                             if institutional_value is not None:
                                 institutional_net_sum += institutional_value
                             if foreign_value is not None:
                                 foreign_net_sum += foreign_value
                             
-                            count += 1
-                            if count >= 3:  # 최근 3거래일
-                                break
+                            # 날짜가 있고 값이 하나라도 있으면 카운트
+                            if (institutional_value is not None or foreign_value is not None):
+                                count += 1
+                                if count >= 3:  # 최근 3거래일
+                                    break
                                 
-                        except (ValueError, IndexError) as e:
+                        except (ValueError, IndexError, AttributeError) as e:
                             logger.debug(f"수급 데이터 파싱 실패 (행): {e}")
                             continue
                 
                 if count > 0:
-                    # KRX API에서 이미 데이터를 가져온 경우 덮어쓰지 않음
-                    if result.get('foreign_net') is None:
-                        result['foreign_net'] = round(foreign_net_sum, 2)
-                    if result.get('institutional_net') is None:
-                        result['institutional_net'] = round(institutional_net_sum, 2)
-                    logger.debug(f"{ticker_code} 수급 데이터: 외인 {result['foreign_net']:.2f}만주, 기관 {result['institutional_net']:.2f}만주")
+                    # 네이버 크롤링 데이터로 덮어쓰기 (KRX API가 0.0을 반환한 경우 대체)
+                    result['foreign_net'] = round(foreign_net_sum, 2) if foreign_net_sum != 0.0 else (result.get('foreign_net') or 0.0)
+                    result['institutional_net'] = round(institutional_net_sum, 2) if institutional_net_sum != 0.0 else (result.get('institutional_net') or 0.0)
+                    logger.debug(f"{ticker_code} 수급 데이터 (네이버): 외인 {result['foreign_net']:.2f}만주, 기관 {result['institutional_net']:.2f}만주")
                 else:
-                    if result.get('foreign_net') is None and result.get('institutional_net') is None:
+                    # 네이버 크롤링 실패 시, KRX API 데이터가 0.0이 아니면 유지
+                    if result.get('foreign_net') is None or result.get('foreign_net') == 0.0:
+                        result['foreign_net'] = None
+                    if result.get('institutional_net') is None or result.get('institutional_net') == 0.0:
+                        result['institutional_net'] = None
+                    if (result.get('foreign_net') is None or result.get('foreign_net') == 0.0) and (result.get('institutional_net') is None or result.get('institutional_net') == 0.0):
                         logger.warning(f"{ticker_code}: 수급 데이터를 찾을 수 없음")
                     
             except Exception as e:
@@ -2368,8 +2516,21 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                 else:
                     logger.debug(f"{ticker_code} 네이버 크롤링 실패 (KRX API 데이터 사용 중): {e}")
         
-        # 2. ETF 괴리율 수집 (ETF인 경우만, KRX API에서 가져오지 못한 경우만)
-        if result.get('disparity_rate') is None:
+        # 2. ETF 괴리율 수집 (ETF인 경우만)
+        # 주의: 일반 주식은 NAV가 없으므로 ETF 괴리율을 계산하지 않아야 함
+        # KRX API에서 이미 ETF로 판별된 경우에만 네이버 크롤링으로 재확인
+        nav_from_naver = None
+        
+        # ETF 판별: KRX API에서 이미 ETF로 확인되었거나, 네이버 크롤링에서만 확인
+        is_etf_confirmed = result.get('disparity_rate') is not None and -10 <= result.get('disparity_rate') <= 10
+        
+        # 일반 주식인 경우 네이버 크롤링에서 NAV를 찾으려고 시도하지 않음
+        if not is_etf_confirmed:
+            # KRX API에서 ETF로 판별되지 않은 경우, 일반 주식일 가능성이 높음
+            # 네이버 크롤링에서 NAV를 찾으려고 시도하지 않음
+            logger.debug(f"{ticker_code}: 일반 주식으로 판단, NAV 괴리율 수집 스킵")
+        else:
+            # ETF로 확인된 경우에만 네이버 크롤링으로 재확인
             try:
                 url = f"https://finance.naver.com/item/main.naver?code={code}"
                 logger.debug(f"ETF 괴리율 수집 중: {url}")
@@ -2406,6 +2567,8 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                         continue
                 
                 # NAV 찾기 (테이블에서)
+                # 주의: 일반 주식 페이지에서는 'NAV' 텍스트가 다른 종목(예: NAVER)을 의미할 수 있음
+                # '순자산가치'만 찾도록 제한
                 tables = soup.select('table')
                 for table in tables:
                     rows = table.select('tr')
@@ -2413,9 +2576,10 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                         cells = row.select('td, th')
                         cell_texts = [c.get_text(strip=True) for c in cells]
                         
-                        # NAV 패턴 찾기
+                        # NAV 패턴 찾기 (순자산가치만, NAV는 다른 종목명과 혼동 가능)
                         for i, cell_text in enumerate(cell_texts):
-                            if ('NAV' in cell_text or '순자산가치' in cell_text or '기준가' in cell_text) and nav_value is None:
+                            # 'NAV'는 제외하고 '순자산가치'만 찾기 (일반 주식 페이지의 NAVER 등과 혼동 방지)
+                            if ('순자산가치' in cell_text) and nav_value is None:
                                 # 다음 셀 또는 같은 셀에서 숫자 찾기
                                 if i + 1 < len(cells):
                                     nav_text = cells[i + 1].get_text(strip=True)
@@ -2434,15 +2598,36 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                                         pass
                 
                 # NAV가 있고 시장가가 있으면 괴리율 계산
+                # 주의: 일반 주식은 NAV가 없으므로, NAV 값이 합리적인 범위인지 확인 필요
+                # 일반 주식의 경우 기준가나 액면가를 NAV로 잘못 인식할 수 있음
                 if nav_value and nav_value > 0 and market_price and market_price > 0:
+                    # NAV와 시장가의 비율이 합리적인지 확인 (일반 주식은 NAV가 없으므로 비율이 비정상적일 수 있음)
+                    # ETF의 경우 NAV와 시장가가 비슷한 수준이어야 함 (괴리율 -10% ~ +10%)
+                    # 일반 주식의 경우 NAV로 잘못 인식된 값(예: 기준가, 액면가)이 시장가와 크게 다를 수 있음
                     disparity_rate = ((market_price - nav_value) / nav_value) * 100
-                    result['disparity_rate'] = round(disparity_rate, 2)
-                    logger.debug(f"{ticker_code} ETF 괴리율: {result['disparity_rate']:.2f}% (NAV: {nav_value:,.0f}, 시장가: {market_price:,.0f})")
+                    
+                    # 괴리율이 -10% ~ +10% 범위 내에 있으면 ETF로 간주
+                    if -10 <= disparity_rate <= 10:
+                        nav_from_naver = round(disparity_rate, 2)
+                        logger.debug(f"{ticker_code} ETF 괴리율 (네이버): {nav_from_naver:.2f}% (NAV: {nav_value:,.0f}, 시장가: {market_price:,.0f})")
+                    else:
+                        # 괴리율이 비정상적으로 크면 일반 주식으로 판단 (NAV로 잘못 인식된 값일 가능성)
+                        logger.debug(f"{ticker_code}: NAV 괴리율이 비정상적 ({disparity_rate:.2f}%), 일반 주식으로 판단하여 NAV 괴리율 수집 안 함")
                 else:
                     # ETF가 아닐 수 있음 (일반 주식은 NAV가 없음)
                     logger.debug(f"{ticker_code}: ETF 괴리율 데이터 없음 (일반 주식일 수 있음, NAV: {nav_value}, 시장가: {market_price})")
             except Exception as e:
                 logger.debug(f"{ticker_code} ETF 괴리율 수집 실패 (일반 주식일 수 있음): {e}")
+        
+        # 네이버 크롤링 결과가 있고 합리적인 범위 내에 있으면 우선 사용
+        if nav_from_naver is not None:
+            result['disparity_rate'] = nav_from_naver
+        elif result.get('disparity_rate') is not None:
+            # KRX API에서 가져온 값이 있지만, 합리적인 범위를 벗어나면 None으로 설정
+            krx_disparity = result.get('disparity_rate')
+            if not (-10 <= krx_disparity <= 10):
+                logger.debug(f"{ticker_code}: KRX API NAV 괴리율이 비정상적 ({krx_disparity:.2f}%), 일반 주식으로 판단하여 None으로 설정")
+                result['disparity_rate'] = None
         
         return result
         
