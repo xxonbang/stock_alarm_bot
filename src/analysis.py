@@ -488,7 +488,8 @@ def calculate_returns(ticker: str) -> Dict:
         'technical': {},
         'supply_demand': {'foreign': None, 'institutional': None},
         'disparity_rate': None,
-        'institutional_held': None
+        'institutional_held': None,
+        'total_volume': None  # 전체 거래량 (만 주 단위)
     }
     
     # 날짜 불일치 문제 해결: 한 번의 데이터 조회로 현재가와 과거 가격을 모두 가져옴
@@ -509,6 +510,18 @@ def calculate_returns(ticker: str) -> Dict:
         # 현재가: 가장 최근 거래일의 종가
         current_price = float(data['Close'].iloc[-1])
         result['current_price'] = current_price
+        
+        # 전체 거래량: 가장 최근 거래일의 거래량 (Volume)
+        if 'Volume' in data.columns:
+            latest_volume = data['Volume'].iloc[-1]
+            if pd.notna(latest_volume) and latest_volume > 0:
+                # 거래량을 '만 주' 단위로 환산
+                volume_in_man = float(latest_volume) / 10000.0
+                result['total_volume'] = volume_in_man
+            else:
+                result['total_volume'] = None
+        else:
+            result['total_volume'] = None
         
         # 기간별 수익률 계산 (거래일 기준, 실제 시장 기준과 일치하도록 조정)
         # 참고: 1개월 = 약 20-22거래일, 1년 = 약 250거래일 (한국 시장 기준)
@@ -777,105 +790,166 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 else:
                     price_str = str(current_price)
                 
-                # 주요 수익률 계산
-                period_mapping = {
-                    '24h': ('1D', '1일'),
-                    '3d': ('3D', '3일'),
-                    '7d': ('1W', '1주'),
-                    '1m': ('1M', '1개월'),
-                    '3m': ('3M', '3개월'),
-                    '6m': ('6M', '6개월'),
-                    '1y': ('1Y', '1년')
-                }
-                
-                returns_parts = []
-                for period_key, (period_code, period_label) in period_mapping.items():
-                    if period_code in returns:
-                        val = returns[period_code]
-                        if isinstance(val, (int, float)):
-                            arrow = "📈" if val >= 0 else "📉"
-                            sign = "+" if val >= 0 else ""
-                            returns_parts.append(f"{arrow} {period_label}: {sign}{val:.2f}%")
-                
-                if returns_parts:
-                    returns_str = "\n    " + "\n    ".join(returns_parts)
-                else:
-                    returns_str = "N/A"
-                
-                # 기술적 지표 포맷팅 (AI 전달용)
-                technical_parts = []
+                # 상태 이모지 결정 (종목 헤더용)
                 rsi = technical.get('rsi')
                 ma_deviation = technical.get('ma_deviation')
                 ma_disparity = technical.get('ma_disparity')
-                year_high_pos = technical.get('year_high_pos')
                 pullback_status = technical.get('pullback_status')
                 
-                if rsi is not None:
-                    rsi_status = ""
+                status_emoji = "[해당없음]"
+                if pullback_status and '눌림목' in pullback_status:
+                    status_emoji = "[✅눌림목]"
+                elif rsi is not None:
                     if rsi >= 70:
-                        rsi_status = " [과매수]"
+                        status_emoji = "[🔥과열]"
                     elif rsi <= 30:
-                        rsi_status = " [과매도]"
-                    technical_parts.append(f"RSI: {rsi:.1f}{rsi_status}")
-                
-                if ma_deviation is not None:
-                    ma_status = ""
+                        status_emoji = "[❄️침체]"
+                elif ma_deviation is not None:
                     if ma_deviation > 105:
-                        ma_status = " [단기 과열]"
+                        status_emoji = "[🔥과열]"
                     elif ma_deviation < 95:
-                        ma_status = " [침체]"
-                    technical_parts.append(f"20일 이격도: {ma_deviation:.1f}%{ma_status}")
+                        status_emoji = "[❄️침체]"
+                elif ma_disparity is not None:
+                    if ma_disparity > 105:
+                        status_emoji = "[🔥과열]"
+                    elif ma_disparity < 95:
+                        status_emoji = "[❄️침체]"
                 
-                if ma_disparity is not None:
-                    technical_parts.append(f"MA 이격도: {ma_disparity:.1f}%")
+                # 1일 변동률 추출 및 이모지 결정
+                one_day_return = None
+                if '1D' in returns:
+                    one_day_return = returns['1D']
                 
-                if year_high_pos is not None:
-                    technical_parts.append(f"52주 위치: {year_high_pos:.1f}%")
-                
-                if pullback_status is not None:
-                    if pullback_status == '눌림목 발생(강력)':
-                        technical_parts.append(f"눌림목: {pullback_status} ⚠️")
-                    else:
-                        technical_parts.append(f"눌림목: {pullback_status}")
-                
-                # 기술적 지표 포맷팅 (가독성 개선: 줄바꿈 사용)
-                if technical_parts:
-                    technical_str = "\n   " + "\n   ".join(technical_parts)
+                # 1일 변동률 이모지 (🔴 상승, 🔵 하락)
+                one_day_emoji = ""
+                if one_day_return is not None and isinstance(one_day_return, (int, float)):
+                    one_day_emoji = "🔴" if one_day_return >= 0 else "🔵"
+                    sign = "+" if one_day_return >= 0 else ""
+                    one_day_str = f"({one_day_emoji}{sign}{one_day_return:.2f}%)"
                 else:
-                    technical_str = "N/A"
+                    one_day_str = ""
                 
-                # 수급 데이터 및 ETF 괴리율 포맷팅 (가독성 개선: 줄바꿈 사용)
-                additional_info = []
+                # 주요 기간 수익률 추출 (1주, 1개월) - 라벨 포함
+                period_mapping = {
+                    '1W': '1주',
+                    '1M': '1월'
+                }
+                
+                main_returns = []
+                for period_code, period_label in period_mapping.items():
+                    if period_code in returns:
+                        val = returns[period_code]
+                        if isinstance(val, (int, float)):
+                            sign = "+" if val >= 0 else ""
+                            # 소수점 자리수 조정 (1월은 정수, 1주는 소수점 1자리)
+                            if period_code == '1M':
+                                main_returns.append(f"<code>{period_label}{sign}{val:.0f}%</code>")
+                            else:
+                                main_returns.append(f"<code>{period_label}{sign}{val:.1f}%</code>")
+                
+                # 주요 기간 수익률 한 줄 포맷팅
+                if main_returns:
+                    main_returns_str = " ".join(main_returns)
+                else:
+                    main_returns_str = ""
+                
+                # 기술적 지표 초압축 포맷 (R:RSI, D:이격도, 52주:위치%)
+                technical_parts = []
+                
+                # RSI: R55 형식
+                if rsi is not None:
+                    technical_parts.append(f"<code>R{int(rsi)}</code>")
+                
+                # 이격도: D101 형식 (ma_deviation 우선)
+                deviation_value = ma_deviation if ma_deviation is not None else ma_disparity
+                if deviation_value is not None:
+                    technical_parts.append(f"<code>D{int(deviation_value)}</code>")
+                
+                # 52주 위치: 52주:98% 형식
+                year_high_pos = technical.get('year_high_pos')
+                if year_high_pos is not None:
+                    technical_parts.append(f"<code>52주:{int(year_high_pos)}%</code>")
+                
+                if technical_parts:
+                    technical_str = "⚙️ " + " ".join(technical_parts)
+                else:
+                    technical_str = "⚙️ N/A"
+                
+                # 전체 거래량 및 수급 데이터 초압축 포맷
+                volume_parts = []
+                supply_parts = []
+                
+                # 전체 거래량 (만 주 단위)
+                total_volume = result.get('total_volume')
+                if total_volume is not None and total_volume > 0:
+                    volume_parts.append(f"<code>거래:{total_volume:.0f}만</code>")
+                
+                # 수급 데이터 (외:수량, 기:수량) - 외와 기는 공백으로 구분
                 supply_demand = result.get('supply_demand', {})
                 foreign_net = supply_demand.get('foreign')
                 institutional_net = supply_demand.get('institutional')
                 
-                if foreign_net is not None or institutional_net is not None:
-                    supply_parts = []
-                    if foreign_net is not None:
-                        sign = "+" if foreign_net >= 0 else ""
-                        supply_parts.append(f"외인 {sign}{foreign_net:.2f}만주")
-                    if institutional_net is not None:
-                        sign = "+" if institutional_net >= 0 else ""
-                        supply_parts.append(f"기관 {sign}{institutional_net:.2f}만주")
-                    if supply_parts:
-                        additional_info.append("수급: " + " / ".join(supply_parts))
+                if foreign_net is not None:
+                    sign = "+" if foreign_net >= 0 else ""
+                    supply_parts.append(f"<code>외:{sign}{foreign_net:.0f}만</code>")
                 
+                if institutional_net is not None:
+                    sign = "+" if institutional_net >= 0 else ""
+                    supply_parts.append(f"<code>기:{sign}{institutional_net:.0f}만</code>")
+                
+                # ETF 괴리율
                 disparity_rate = result.get('disparity_rate')
                 if disparity_rate is not None:
-                    additional_info.append(f"ETF 괴리율: {disparity_rate:.2f}%")
+                    sign = "+" if disparity_rate >= 0 else ""
+                    supply_parts.append(f"<code>NAV{sign}{disparity_rate:.2f}%</code>")
                 
-                institutional_held = result.get('institutional_held')
-                if institutional_held is not None:
-                    additional_info.append(f"기관 보유: {institutional_held:.2f}%")
+                # 포맷팅: 거래량 | 외/기 (공백) | NAV
+                volume_supply_str = ""
+                if volume_parts:
+                    volume_supply_str = volume_parts[0]
+                    if supply_parts:
+                        # 외와 기는 공백으로, NAV는 | 로 구분
+                        nav_part = None
+                        foreign_part = None
+                        inst_part = None
+                        for part in supply_parts:
+                            if 'NAV' in part:
+                                nav_part = part
+                            elif '외:' in part:
+                                foreign_part = part
+                            elif '기:' in part:
+                                inst_part = part
+                        
+                        if foreign_part or inst_part:
+                            supply_combined = " ".join([p for p in [foreign_part, inst_part] if p])
+                            volume_supply_str += f" | {supply_combined}"
+                        
+                        if nav_part:
+                            volume_supply_str += f" | {nav_part}"
                 
-                # 종목명과 티커명 강조 효과 (기술적 지표 및 추가 정보 포함, 가독성 개선)
-                summary_line = f"📊 <b>{ticker_name}</b> <code>({ticker})</code>\n   현재가: <b>{price_str}</b>\n   변동률:{returns_str}\n   기술적 지표:{technical_str}"
-                if additional_info:
-                    summary_line += f"\n   추가 정보: {' | '.join(additional_info)}"
+                # 종목 요약 메시지 생성 (초압축 4줄 포맷)
+                # 1행: 헤더 (종목명, 티커, 상태)
+                # 2행: 가격/수익 (현재가, 1일%, 주요 기간 수익률)
+                # 3행: 지표 (RSI, 이격도, 52주)
+                # 4행: 거래량/수급 (거래량, 외인, 기관, NAV)
+                summary_lines = [
+                    f"📊 <b>{ticker_name}</b> <code>{ticker}</code> {status_emoji}",
+                    f"💰 <b>{price_str}</b> {one_day_str} | {main_returns_str}",
+                    f"{technical_str}"
+                ]
+                
+                if volume_supply_str:
+                    summary_lines.append(f"📊 {volume_supply_str}")
+                
+                summary_line = "\n".join(summary_lines)
                 summary_parts.append(summary_line)
+                
+                # 종목 간 구분을 위한 빈 줄 추가
+                summary_parts.append("")
             
-            # 카테고리별 메시지 생성
+            # 카테고리별 메시지 생성 (마지막 빈 줄 제거)
+            if summary_parts and summary_parts[-1] == "":
+                summary_parts = summary_parts[:-1]
             category_messages[category_key] = "\n".join(summary_parts)
     
     total_count = sum(len(results) for results in category_results.values() if results)
