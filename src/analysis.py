@@ -606,28 +606,50 @@ def calculate_returns(ticker: str) -> Dict:
             from src.crawler import get_kr_stock_data
             kr_data = get_kr_stock_data(ticker)
             if kr_data:
-                # None 체크 강화
+                # None 체크 강화 (3일치와 1일치 모두 수집)
                 foreign_net = kr_data.get('foreign_net')
                 institutional_net = kr_data.get('institutional_net')
+                foreign_net_1d = kr_data.get('foreign_net_1d')
+                institutional_net_1d = kr_data.get('institutional_net_1d')
                 disparity_rate = kr_data.get('disparity_rate')
                 total_volume = kr_data.get('total_volume')
+                total_volume_1d = kr_data.get('total_volume_1d')
                 
+                # 3일치 데이터
                 if foreign_net is not None:
                     result['supply_demand']['foreign'] = foreign_net
                 if institutional_net is not None:
                     result['supply_demand']['institutional'] = institutional_net
+                # 1일치 데이터
+                if foreign_net_1d is not None:
+                    if 'supply_demand_1d' not in result:
+                        result['supply_demand_1d'] = {}
+                    result['supply_demand_1d']['foreign'] = foreign_net_1d
+                if institutional_net_1d is not None:
+                    if 'supply_demand_1d' not in result:
+                        result['supply_demand_1d'] = {}
+                    result['supply_demand_1d']['institutional'] = institutional_net_1d
+                
                 if disparity_rate is not None:
                     result['disparity_rate'] = disparity_rate
                 
                 # KRX API 거래량이 있으면 우선 사용 (yfinance보다 정확)
+                # 3일치 거래량
                 if total_volume is not None and isinstance(total_volume, (int, float)) and total_volume > 0:
                     try:
                         # KRX API는 주 단위로 반환하므로 만주로 변환
                         result['total_volume'] = float(total_volume) / 10000.0
-                        logger.debug(f"{ticker} KRX API 거래량 사용: {result['total_volume']:.2f}만주")
+                        logger.debug(f"{ticker} KRX API 거래량(3일) 사용: {result['total_volume']:.2f}만주")
                     except (ValueError, TypeError) as e:
                         logger.warning(f"{ticker} 거래량 변환 실패: {e}")
                         # 변환 실패 시 기존 yfinance 값 유지
+                # 1일치 거래량
+                if total_volume_1d is not None and isinstance(total_volume_1d, (int, float)) and total_volume_1d > 0:
+                    try:
+                        result['total_volume_1d'] = float(total_volume_1d) / 10000.0
+                        logger.debug(f"{ticker} KRX API 거래량(1일) 사용: {result['total_volume_1d']:.2f}만주")
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"{ticker} 거래량(1일) 변환 실패: {e}")
         except Exception as e:
             logger.debug(f"{ticker} 국내 주식 데이터 수집 실패: {e}")
     
@@ -919,78 +941,137 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 # 52주 위치: 52주:98% 형식
                 year_high_pos = technical.get('year_high_pos')
                 if year_high_pos is not None:
-                    technical_parts.append(f"<code>52주:{int(year_high_pos)}%</code>")
+                    technical_parts.append(f"| <code>52주:{int(year_high_pos)}%</code>")
                 
                 if technical_parts:
                     technical_str = "⚙️ " + " ".join(technical_parts)
                 else:
                     technical_str = "⚙️ N/A"
                 
-                # 전체 거래량 및 수급 데이터 초압축 포맷
-                volume_parts = []
-                supply_parts = []
+                # 전체 거래량 및 수급 데이터 초압축 포맷 (1일치와 3일치 모두 표시)
+                # 국내 종목인지 해외 종목인지 확인
+                is_domestic = '.KS' in ticker or '.KQ' in ticker
                 
-                # 전체 거래량 (만 주 단위)
-                total_volume = result.get('total_volume')
-                if total_volume is not None and total_volume > 0:
-                    volume_parts.append(f"<code>거래:{total_volume:.0f}만</code>")
-                
-                # 수급 데이터 (외:수량, 기:수량) - 외와 기는 공백으로 구분
-                supply_demand = result.get('supply_demand', {})
-                foreign_net = supply_demand.get('foreign')
-                institutional_net = supply_demand.get('institutional')
-                
-                if foreign_net is not None:
-                    sign = "+" if foreign_net >= 0 else ""
-                    supply_parts.append(f"<code>외:{sign}{foreign_net:.0f}만</code>")
-                
-                if institutional_net is not None:
-                    sign = "+" if institutional_net >= 0 else ""
-                    supply_parts.append(f"<code>기:{sign}{institutional_net:.0f}만</code>")
-                
-                # ETF 괴리율
-                disparity_rate = result.get('disparity_rate')
-                if disparity_rate is not None:
-                    sign = "+" if disparity_rate >= 0 else ""
-                    supply_parts.append(f"<code>NAV{sign}{disparity_rate:.2f}%</code>")
-                
-                # 포맷팅: 거래량 | 외/기 (공백) | NAV
-                volume_supply_str = ""
-                if volume_parts:
-                    volume_supply_str = volume_parts[0]
-                    if supply_parts:
-                        # 외와 기는 공백으로, NAV는 | 로 구분
-                        nav_part = None
-                        foreign_part = None
-                        inst_part = None
-                        for part in supply_parts:
-                            if 'NAV' in part:
-                                nav_part = part
-                            elif '외:' in part:
-                                foreign_part = part
-                            elif '기:' in part:
-                                inst_part = part
-                        
-                        if foreign_part or inst_part:
-                            supply_combined = " ".join([p for p in [foreign_part, inst_part] if p])
-                            volume_supply_str += f" | {supply_combined}"
+                if is_domestic:
+                    # 국내 종목: 1일치와 3일치 모두 표시 (외국인/기관 순매매량 포함)
+                    # 1일치 데이터 포맷팅
+                    volume_parts_1d = []
+                    supply_parts_1d = []
+                    
+                    total_volume_1d = result.get('total_volume_1d')
+                    if total_volume_1d is not None and total_volume_1d > 0:
+                        volume_parts_1d.append(f"<code>거래:{total_volume_1d:.0f}만</code>")
+                    
+                    supply_demand_1d = result.get('supply_demand_1d', {})
+                    foreign_net_1d = supply_demand_1d.get('foreign')
+                    institutional_net_1d = supply_demand_1d.get('institutional')
+                    
+                    if foreign_net_1d is not None:
+                        sign = "+" if foreign_net_1d >= 0 else ""
+                        supply_parts_1d.append(f"<code>외:{sign}{foreign_net_1d:.0f}만</code>")
+                    
+                    if institutional_net_1d is not None:
+                        sign = "+" if institutional_net_1d >= 0 else ""
+                        supply_parts_1d.append(f"<code>기:{sign}{institutional_net_1d:.0f}만</code>")
+                    
+                    # 3일치 데이터 포맷팅
+                    volume_parts_3d = []
+                    supply_parts_3d = []
+                    
+                    total_volume = result.get('total_volume')
+                    if total_volume is not None and total_volume > 0:
+                        volume_parts_3d.append(f"<code>거래:{total_volume:.0f}만</code>")
+                    
+                    supply_demand = result.get('supply_demand', {})
+                    foreign_net = supply_demand.get('foreign')
+                    institutional_net = supply_demand.get('institutional')
+                    
+                    if foreign_net is not None:
+                        sign = "+" if foreign_net >= 0 else ""
+                        supply_parts_3d.append(f"<code>외:{sign}{foreign_net:.0f}만</code>")
+                    
+                    if institutional_net is not None:
+                        sign = "+" if institutional_net >= 0 else ""
+                        supply_parts_3d.append(f"<code>기:{sign}{institutional_net:.0f}만</code>")
+                    
+                    # ETF 괴리율 (1일치 줄에만 표시)
+                    disparity_rate = result.get('disparity_rate')
+                    nav_part = None
+                    if disparity_rate is not None:
+                        sign = "+" if disparity_rate >= 0 else ""
+                        nav_part = f"<code>NAV{sign}{disparity_rate:.2f}%</code>"
+                    
+                    # 1일치 포맷팅
+                    volume_supply_str_1d = ""
+                    if volume_parts_1d:
+                        volume_supply_str_1d = volume_parts_1d[0]
+                        if supply_parts_1d:
+                            foreign_part_1d = None
+                            inst_part_1d = None
+                            for part in supply_parts_1d:
+                                if '외:' in part:
+                                    foreign_part_1d = part
+                                elif '기:' in part:
+                                    inst_part_1d = part
+                            
+                            if foreign_part_1d or inst_part_1d:
+                                supply_combined_1d = " | ".join([p for p in [foreign_part_1d, inst_part_1d] if p])
+                                volume_supply_str_1d += f" | {supply_combined_1d}"
                         
                         if nav_part:
-                            volume_supply_str += f" | {nav_part}"
+                            volume_supply_str_1d += f" | {nav_part}"
+                    
+                    # 3일치 포맷팅
+                    volume_supply_str_3d = ""
+                    if volume_parts_3d:
+                        volume_supply_str_3d = volume_parts_3d[0]
+                        if supply_parts_3d:
+                            foreign_part_3d = None
+                            inst_part_3d = None
+                            for part in supply_parts_3d:
+                                if '외:' in part:
+                                    foreign_part_3d = part
+                                elif '기:' in part:
+                                    inst_part_3d = part
+                            
+                            if foreign_part_3d or inst_part_3d:
+                                supply_combined_3d = " | ".join([p for p in [foreign_part_3d, inst_part_3d] if p])
+                                volume_supply_str_3d += f" | {supply_combined_3d}"
+                else:
+                    # 해외 종목: 거래량과 기관 보유 비중만 표시
+                    volume_parts = []
+                    institutional_held = result.get('institutional_held')
+                    
+                    # 거래량 (yfinance에서 가져온 값)
+                    total_volume = result.get('total_volume')
+                    if total_volume is not None and total_volume > 0:
+                        volume_parts.append(f"<code>거래:{total_volume:.0f}만</code>")
+                    
+                    # 기관 보유 비중
+                    if institutional_held is not None:
+                        volume_parts.append(f"<code>기관보유:{institutional_held:.1f}%</code>")
+                    
+                    # 해외 종목은 1줄로 표시
+                    volume_supply_str_1d = " | ".join(volume_parts) if volume_parts else ""
+                    volume_supply_str_3d = ""  # 해외 종목은 3일치 없음
                 
-                # 종목 요약 메시지 생성 (초압축 4줄 포맷)
+                # 종목 요약 메시지 생성 (초압축 5줄 포맷)
                 # 1행: 헤더 (종목명, 티커, 상태)
                 # 2행: 가격/수익 (현재가, 1일%, 주요 기간 수익률)
                 # 3행: 지표 (RSI, 이격도, 52주)
-                # 4행: 거래량/수급 (거래량, 외인, 기관, NAV)
+                # 4행: 거래량/수급 1일치
+                # 5행: 거래량/수급 3일치
                 summary_lines = [
                     f"📊 <b>{ticker_name}</b> <code>{ticker}</code> {status_emoji}",
                     f"💰 <b>{price_str}</b> {one_day_str} | {main_returns_str}",
                     f"{technical_str}"
                 ]
                 
-                if volume_supply_str:
-                    summary_lines.append(f"📊 {volume_supply_str}")
+                if volume_supply_str_1d:
+                    summary_lines.append(f"📊 {volume_supply_str_1d}")
+                
+                if volume_supply_str_3d:
+                    summary_lines.append(f"📊 {volume_supply_str_3d}")
                 
                 summary_line = "\n".join(summary_lines)
                 summary_parts.append(summary_line)

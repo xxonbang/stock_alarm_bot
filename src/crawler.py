@@ -1926,14 +1926,21 @@ def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optio
         {
             'foreign_net': 외국인 순매매량 (만 주, 최근 3거래일 합계),
             'institutional_net': 기관 순매매량 (만 주, 최근 3거래일 합계),
+            'foreign_net_1d': 외국인 순매매량 (만 주, 최근 1거래일),
+            'institutional_net_1d': 기관 순매매량 (만 주, 최근 1거래일),
             'disparity_rate': None (이 API는 수급 데이터만 제공),
-            'total_volume': 전체 거래량 (주 단위, ACC_TRDVOL, 최근 거래일)
+            'total_volume': 전체 거래량 (주 단위, ACC_TRDVOL, 최근 3거래일 합계),
+            'total_volume_1d': 전체 거래량 (주 단위, ACC_TRDVOL, 최근 1거래일)
         }
     """
     result = {
         'foreign_net': None,
         'institutional_net': None,
-        'disparity_rate': None
+        'foreign_net_1d': None,
+        'institutional_net_1d': None,
+        'disparity_rate': None,
+        'total_volume': None,
+        'total_volume_1d': None
     }
     
     # .KS, .KQ 제거하여 순수 코드만 추출
@@ -1942,9 +1949,12 @@ def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optio
     try:
         from datetime import datetime, timedelta
         
-        # 최근 3거래일 데이터 수집
+        # 최근 3거래일 데이터 수집 (1일치와 3일치 모두 수집)
         foreign_sum = 0.0
         institutional_sum = 0.0
+        foreign_1d = None
+        institutional_1d = None
+        volume_1d = None
         count = 0
         
         for i in range(3):
@@ -1994,18 +2004,29 @@ def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optio
                                 foreign_value = float(row.get('외국인순매수', 0) or row.get('FRGN_NTBY_QTY', 0) or 0)
                                 inst_value = float(row.get('기관순매수', 0) or row.get('ORG_NTBY_QTY', 0) or 0)
                                 
-                                # 거래량 추출 (ACC_TRDVOL) - 최근 거래일만 저장
-                                if count == 0:  # 첫 번째(최근) 거래일의 거래량만 저장
-                                    volume_str = row.get('ACC_TRDVOL') or row.get('거래량') or None
-                                    if volume_str:
-                                        try:
-                                            volume_value = float(str(volume_str).replace(',', ''))
-                                            if volume_value > 0:
-                                                result['total_volume'] = volume_value
-                                        except (ValueError, TypeError):
-                                            pass
+                                # 거래량 추출 (ACC_TRDVOL) - 1일치와 3일치 모두 수집
+                                volume_str = row.get('ACC_TRDVOL') or row.get('거래량') or None
+                                if volume_str:
+                                    try:
+                                        volume_value = float(str(volume_str).replace(',', ''))
+                                        if volume_value > 0:
+                                            # 1일치 저장 (최근 거래일만)
+                                            if count == 0:
+                                                result['total_volume_1d'] = volume_value
+                                                volume_1d = volume_value
+                                            # 3거래일 합계로 누적
+                                            if result['total_volume'] is None:
+                                                result['total_volume'] = 0.0
+                                            result['total_volume'] += volume_value
+                                    except (ValueError, TypeError):
+                                        pass
                                 
                                 # 주 수로 변환 (이미 주 단위일 수 있음, 명세서 확인 필요)
+                                # 1일치 저장 (최근 거래일만)
+                                if count == 0:
+                                    foreign_1d = foreign_value
+                                    institutional_1d = inst_value
+                                # 3일치 합계
                                 foreign_sum += foreign_value
                                 institutional_sum += inst_value
                                 count += 1
@@ -2057,9 +2078,15 @@ def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optio
         
         if count > 0:
             # 만주로 변환 (API가 주 단위로 반환한다고 가정)
+            # 3일치 합계
             result['foreign_net'] = round(foreign_sum / 10000, 2)
             result['institutional_net'] = round(institutional_sum / 10000, 2)
-            logger.debug(f"{ticker_code} KRX API 데이터: 외인 {result['foreign_net']:.2f}만주, 기관 {result['institutional_net']:.2f}만주")
+            # 1일치
+            if foreign_1d is not None:
+                result['foreign_net_1d'] = round(foreign_1d / 10000, 2)
+            if institutional_1d is not None:
+                result['institutional_net_1d'] = round(institutional_1d / 10000, 2)
+            logger.debug(f"{ticker_code} KRX API 데이터: 외인(3일) {result['foreign_net']:.2f}만주, 기관(3일) {result['institutional_net']:.2f}만주, 외인(1일) {result.get('foreign_net_1d', 'N/A')}, 기관(1일) {result.get('institutional_net_1d', 'N/A')}")
         else:
             logger.debug(f"{ticker_code}: KRX API에서 데이터를 가져올 수 없음")
     
@@ -2264,14 +2291,21 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
         {
             'foreign_net': 외국인 순매매량 (만 주, 최근 3거래일 합계),
             'institutional_net': 기관 순매매량 (만 주, 최근 3거래일 합계),
-            'disparity_rate': ETF 괴리율 (NAV 대비 %, ETF가 아닐 경우 None)
+            'foreign_net_1d': 외국인 순매매량 (만 주, 최근 1거래일),
+            'institutional_net_1d': 기관 순매매량 (만 주, 최근 1거래일),
+            'disparity_rate': ETF 괴리율 (NAV 대비 %, ETF가 아닐 경우 None),
+            'total_volume': 전체 거래량 (주 단위, ACC_TRDVOL, 최근 3거래일 합계),
+            'total_volume_1d': 전체 거래량 (주 단위, ACC_TRDVOL, 최근 1거래일)
         }
     """
     result = {
         'foreign_net': None,
         'institutional_net': None,
+        'foreign_net_1d': None,
+        'institutional_net_1d': None,
         'disparity_rate': None,
-        'total_volume': None  # ACC_TRDVOL (거래량)
+        'total_volume': None,
+        'total_volume_1d': None
     }
     
     # .KS, .KQ 제거하여 순수 코드만 추출
@@ -2312,14 +2346,20 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
             if not is_etf:
                 try:
                     krx_data = get_kr_stock_data_krx_api(ticker_code, settings.krx_api_key)
-                    # KRX API에서 데이터를 성공적으로 가져온 경우
+                    # KRX API에서 데이터를 성공적으로 가져온 경우 (1일치와 3일치 모두)
                     if krx_data.get('foreign_net') is not None or krx_data.get('institutional_net') is not None:
                         result['foreign_net'] = krx_data.get('foreign_net')
                         result['institutional_net'] = krx_data.get('institutional_net')
-                        logger.debug(f"{ticker_code}: KRX API로 수급 데이터 수집 성공")
-                    # 거래량도 함께 저장 (ETF가 아닌 경우)
+                        logger.debug(f"{ticker_code}: KRX API로 수급 데이터(3일) 수집 성공")
+                    if krx_data.get('foreign_net_1d') is not None or krx_data.get('institutional_net_1d') is not None:
+                        result['foreign_net_1d'] = krx_data.get('foreign_net_1d')
+                        result['institutional_net_1d'] = krx_data.get('institutional_net_1d')
+                        logger.debug(f"{ticker_code}: KRX API로 수급 데이터(1일) 수집 성공")
+                    # 거래량도 함께 저장 (ETF가 아닌 경우, 1일치와 3일치 모두)
                     if krx_data.get('total_volume') is not None:
                         result['total_volume'] = krx_data.get('total_volume')
+                    if krx_data.get('total_volume_1d') is not None:
+                        result['total_volume_1d'] = krx_data.get('total_volume_1d')
                 except Exception as e:
                     logger.debug(f"{ticker_code}: KRX API 수급 데이터 실패, 네이버 크롤링으로 대체: {e}")
             else:
@@ -2356,9 +2396,11 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                 soup = BeautifulSoup(content, 'html.parser')
                 
                 # 외인/기관 순매매량 테이블 찾기
-                # 최근 3거래일 데이터 추출
+                # 최근 3거래일 데이터 추출 (1일치와 3일치 모두)
                 foreign_net_sum = 0.0
                 institutional_net_sum = 0.0
+                foreign_net_1d = None
+                institutional_net_1d = None
                 count = 0
                 
                 # 외인/기관 관련 테이블 찾기
@@ -2458,6 +2500,13 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                             if foreign_value is not None:
                                 foreign_net_sum += foreign_value
                             
+                            # 1일치 저장 (최근 거래일만)
+                            if count == 0:
+                                if institutional_value is not None:
+                                    institutional_net_1d = institutional_value
+                                if foreign_value is not None:
+                                    foreign_net_1d = foreign_value
+                            
                             # 날짜가 있고 값이 하나라도 있으면 카운트
                             if (institutional_value is not None or foreign_value is not None):
                                 count += 1
@@ -2470,9 +2519,15 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                 
                 if count > 0:
                     # 네이버 크롤링 데이터로 덮어쓰기 (KRX API가 0.0을 반환한 경우 대체)
+                    # 3일치 합계
                     result['foreign_net'] = round(foreign_net_sum, 2) if foreign_net_sum != 0.0 else (result.get('foreign_net') or 0.0)
                     result['institutional_net'] = round(institutional_net_sum, 2) if institutional_net_sum != 0.0 else (result.get('institutional_net') or 0.0)
-                    logger.debug(f"{ticker_code} 수급 데이터 (네이버): 외인 {result['foreign_net']:.2f}만주, 기관 {result['institutional_net']:.2f}만주")
+                    # 1일치
+                    if foreign_net_1d is not None:
+                        result['foreign_net_1d'] = round(foreign_net_1d, 2)
+                    if institutional_net_1d is not None:
+                        result['institutional_net_1d'] = round(institutional_net_1d, 2)
+                    logger.debug(f"{ticker_code} 수급 데이터 (네이버): 외인(3일) {result['foreign_net']:.2f}만주, 기관(3일) {result['institutional_net']:.2f}만주, 외인(1일) {result.get('foreign_net_1d', 'N/A')}, 기관(1일) {result.get('institutional_net_1d', 'N/A')}")
                 else:
                     # 네이버 크롤링 실패 시, KRX API 데이터가 0.0이 아니면 유지
                     if result.get('foreign_net') is None or result.get('foreign_net') == 0.0:
