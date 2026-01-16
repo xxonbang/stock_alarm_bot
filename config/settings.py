@@ -62,9 +62,10 @@ class Settings:
         self.chat_id = get_env_var('CHAT_ID')
         
         # Google API Keys (01, 02로 구분)
-        # 01번 키 (기존), 02번 키 (신규)
+        # 01번 키 (필수), 02번 키 (선택적, fallback용)
         self.google_api_key_01 = get_env_var('GOOGLE_API_KEY_01')
-        self.google_api_key_02 = get_env_var('GOOGLE_API_KEY_02')
+        # 02번 키는 선택적 (fallback용이므로 없어도 됨)
+        self.google_api_key_02 = os.getenv('GOOGLE_API_KEY_02', None)
         
         # 기본값은 01번 키 (하위 호환성)
         self.google_api_key = self.google_api_key_01

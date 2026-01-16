@@ -32,7 +32,10 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_API_KEY_01: ${{ secrets.GOOGLE_API_KEY_01 }}
+          GOOGLE_API_KEY_02: ${{ secrets.GOOGLE_API_KEY_02 }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+          KRX_API_KEY_EXPIRY: ${{ secrets.KRX_API_KEY_EXPIRY }}
         run: |
           python src/main.py
