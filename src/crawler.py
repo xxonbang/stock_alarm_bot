@@ -976,8 +976,6 @@ def get_fear_greed_index(vix_value: Optional[float] = None) -> Optional[str]:
     return None
 
 
-# 제거됨: main.py에서 사용되지 않음
-# def get_economic_calendar(max_retries: int = 3) -> str:
     """
     Yahoo Finance Economic Calendar에서 오늘부터 향후 3일간의 중요 경제 지표 수집
     Investing.com 대신 Yahoo Finance 사용 (봇 차단 우회)
@@ -2206,7 +2204,9 @@ def get_etf_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optional[f
                                     except (ValueError, TypeError):
                                         pass
                                 
-                                if nav_value > 0 and closing_price > 0:
+                                # NAV와 종가의 합리적인 범위 검증 (0.5 ~ 2.0 비율)
+                                nav_price_ratio = closing_price / nav_value if nav_value > 0 else None
+                                if nav_value > 0 and closing_price > 0 and nav_price_ratio and 0.5 <= nav_price_ratio <= 2.0:
                                     # 괴리율 계산: ((종가 - NAV) / NAV) * 100
                                     disparity_rate = ((closing_price - nav_value) / nav_value) * 100
                                     
@@ -2329,8 +2329,14 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                     # ETF인지 확인: NAV가 있고 괴리율이 합리적인 범위(-10% ~ +10%) 내에 있어야 함
                     # 일반 주식은 NAV가 없거나 괴리율이 비정상적으로 클 수 있음
                     nav = etf_data.get('nav')
+                    closing_price = etf_data.get('closing_price')
                     disparity = etf_data.get('disparity_rate')
-                    if nav and nav > 0 and disparity is not None and -10 <= disparity <= 10:
+                    # ETF 판별: NAV가 있고, NAV/종가 비율이 합리적이며(0.5 ~ 2.0), 괴리율이 합리적인 범위(-10% ~ +10%)
+                    nav_price_ratio = closing_price / nav if nav and nav > 0 and closing_price and closing_price > 0 else None
+                    if (nav and nav > 0 and 
+                        closing_price and closing_price > 0 and
+                        nav_price_ratio and 0.5 <= nav_price_ratio <= 2.0 and
+                        disparity is not None and -10 <= disparity <= 10):
                         is_etf = True
                         # ETF 데이터 저장 (괴리율, 거래량) - 한 번의 호출로 모든 데이터 수집
                         result['disparity_rate'] = etf_data.get('disparity_rate')

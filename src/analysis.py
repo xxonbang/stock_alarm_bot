@@ -17,11 +17,17 @@ import pytz
 import pandas as pd
 import numpy as np
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
 # TradingView API 의존성 제거 - 자체 계산 엔진 사용
+
+# yfinance 데이터 캐시 (티커별로 history 데이터 캐싱하여 중복 호출 방지)
+# 멀티스레딩 환경에서의 안전성을 위해 Lock 사용
+_yfinance_cache = {}  # {ticker: {'hist_data': DataFrame, 'info': dict, 'timestamp': datetime}}
+_yfinance_cache_lock = threading.Lock()  # 캐시 쓰기 보호용 Lock
 
 # AI 금지 검증: 이 파일에서 직접 import하지 않았는지 확인
 # (다른 모듈에서 간접적으로 import되는 것은 허용)
@@ -56,17 +62,32 @@ def get_stock_data(ticker: str, period: str = "1y") -> Optional[yf.Ticker]:
         return None
 
 
-def get_current_price(ticker: str) -> Optional[float]:
+def get_current_price(ticker: str, hist_data: Optional[pd.DataFrame] = None) -> Optional[float]:
     """
     현재 주가를 가져옴 (Close 컬럼 명시적 사용)
     
     Args:
         ticker: 주식 티커 심볼
+        hist_data: 이미 가져온 히스토리 데이터 (Optional, 있으면 재호출 안 함)
     
     Returns:
         현재가 또는 None (실패 시)
     """
     try:
+        # 이미 데이터가 제공된 경우 재호출하지 않음 (중복 호출 방지)
+        if hist_data is not None and not hist_data.empty:
+            # 가장 최근 거래일의 Close 가격 사용
+            return float(hist_data['Close'].iloc[-1])
+        
+        # 캐시 확인 (읽기만 하므로 Lock 불필요하지만 일관성을 위해 사용)
+        with _yfinance_cache_lock:
+            if ticker in _yfinance_cache:
+                cached_data = _yfinance_cache[ticker]
+                if 'hist_data' in cached_data and cached_data['hist_data'] is not None:
+                    cached_hist = cached_data['hist_data']
+                    if not cached_hist.empty:
+                        return float(cached_hist['Close'].iloc[-1])
+        
         stock = get_stock_data(ticker)
         if stock is None:
             return None
@@ -95,37 +116,58 @@ def get_current_price(ticker: str) -> Optional[float]:
         return None
 
 
-def get_historical_price(ticker: str, days_ago: int) -> Optional[float]:
+def get_historical_price(ticker: str, days_ago: int, hist_data: Optional[pd.DataFrame] = None) -> Optional[float]:
     """
     과거 특정 시점의 주가를 가져옴 (정확한 날짜 기준, 거래일 보장)
     
     Args:
         ticker: 주식 티커 심볼
         days_ago: 며칠 전 거래일 데이터를 가져올지 (거래일 기준, 휴장일 제외)
+        hist_data: 이미 가져온 히스토리 데이터 (Optional, 있으면 재호출 안 함)
     
     Returns:
         과거 주가 또는 None (실패 시)
     """
     try:
-        stock = get_stock_data(ticker)
-        if stock is None:
-            return None
-        
-        # 정확한 날짜 기준으로 데이터 가져오기 (리포트 제안 방식)
-        # 충분한 기간의 데이터를 가져와서 정확한 날짜를 찾음
-        if days_ago <= 30:
-            period_days = max(days_ago * 3, 90)  # 여유 있게
-        elif days_ago <= 180:
-            period_days = max(days_ago * 2, 400)
+        # 이미 데이터가 제공된 경우 재호출하지 않음 (중복 호출 방지)
+        if hist_data is not None and not hist_data.empty:
+            data = hist_data
+        # 캐시 확인 (읽기만 하므로 Lock 불필요하지만 일관성을 위해 사용)
+        elif ticker in _yfinance_cache:
+            with _yfinance_cache_lock:
+                cached_data = _yfinance_cache.get(ticker)
+                if cached_data and 'hist_data' in cached_data and cached_data['hist_data'] is not None:
+                    cached_hist = cached_data['hist_data']
+                    if not cached_hist.empty and len(cached_hist) > days_ago:
+                        data = cached_hist
+                    else:
+                        data = None
+                else:
+                    data = None
         else:
-            period_days = max(days_ago * 2, 800)  # 1년 이상은 충분히
+            data = None
         
-        # start/end 날짜를 명시적으로 지정하여 데이터 가져오기
-        end_date = datetime.now(pytz.UTC)
-        start_date = end_date - timedelta(days=period_days)
-        
-        # 배당/분할 반영을 위해 auto_adjust=True 사용
-        data = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'), auto_adjust=True)
+        # 캐시에 없거나 데이터가 부족하면 yfinance로 가져오기
+        if data is None or data.empty or len(data) <= days_ago:
+            stock = get_stock_data(ticker)
+            if stock is None:
+                return None
+            
+            # 정확한 날짜 기준으로 데이터 가져오기 (리포트 제안 방식)
+            # 충분한 기간의 데이터를 가져와서 정확한 날짜를 찾음
+            if days_ago <= 30:
+                period_days = max(days_ago * 3, 90)  # 여유 있게
+            elif days_ago <= 180:
+                period_days = max(days_ago * 2, 400)
+            else:
+                period_days = max(days_ago * 2, 800)  # 1년 이상은 충분히
+            
+            # start/end 날짜를 명시적으로 지정하여 데이터 가져오기
+            end_date = datetime.now(pytz.UTC)
+            start_date = end_date - timedelta(days=period_days)
+            
+            # 배당/분할 반영을 위해 auto_adjust=True 사용
+            data = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'), auto_adjust=True)
         
         if data.empty:
             logger.warning(f"{ticker}: 과거 데이터가 없습니다.")
@@ -531,6 +573,25 @@ def calculate_returns(ticker: str) -> Dict:
             result['current_price'] = "데이터 없음"
             return result
         
+        # stock.info도 미리 가져와서 종목명 조회 시 재사용 (중복 호출 방지)
+        try:
+            stock_info = stock.info if stock else None
+            # stock.info를 result에 저장하여 format_stock_summary_by_category에서 재사용
+            if stock_info:
+                result['stock_info'] = stock_info
+        except Exception as e:
+            logger.debug(f"{ticker} stock.info 조회 실패: {e}")
+            stock_info = None
+        
+        # yfinance 데이터 캐시에 저장 (get_tradingview_technical_summary에서 재사용)
+        # 멀티스레딩 환경에서의 안전성을 위해 Lock 사용
+        with _yfinance_cache_lock:
+            _yfinance_cache[ticker] = {
+                'hist_data': data,
+                'info': stock_info,
+                'timestamp': datetime.now()
+            }
+        
         # 현재가: 가장 최근 거래일의 종가
         current_price = float(data['Close'].iloc[-1])
         result['current_price'] = current_price
@@ -722,6 +783,12 @@ def get_stock_summary_by_category(
     """
     logger.info("=== 주가 데이터 수집 및 요약 시작 (카테고리별) ===")
     
+    # yfinance 캐시 초기화 (새로운 실행마다 캐시 초기화)
+    global _yfinance_cache
+    with _yfinance_cache_lock:
+        _yfinance_cache.clear()
+    logger.debug("yfinance 캐시 초기화 완료")
+    
     # KRX API 캐시 초기화 (새로운 실행마다 캐시 초기화)
     try:
         from src.crawler import _krx_api_cache, _krx_etf_api_cache
@@ -831,22 +898,28 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 returns = result.get('returns', {})
                 technical = result.get('technical', {})
                 
-                # 티커 한글 이름 (매핑에 없으면 yfinance로 조회)
+                # 티커 한글 이름 (매핑에 없으면 calculate_returns에서 가져온 stock_info 재사용)
                 ticker_name = ticker_names.get(ticker)
                 if not ticker_name or ticker_name == ticker:
-                    # yfinance로 종목명 조회
-                    try:
-                        stock = yf.Ticker(ticker)
-                        info = stock.info
-                        if info and len(info) > 0:
-                            # 종목명 추출 (우선순위: longName > shortName > symbol)
-                            ticker_name = info.get('longName') or info.get('shortName') or info.get('symbol', ticker)
-                            logger.debug(f"종목명 조회 성공: {ticker} -> {ticker_name}")
-                        else:
+                    # calculate_returns에서 이미 가져온 stock_info 재사용 (중복 호출 방지)
+                    stock_info = result.get('stock_info')
+                    if stock_info and len(stock_info) > 0:
+                        # 종목명 추출 (우선순위: longName > shortName > symbol)
+                        ticker_name = stock_info.get('longName') or stock_info.get('shortName') or stock_info.get('symbol', ticker)
+                        logger.debug(f"종목명 조회 성공 (재사용): {ticker} -> {ticker_name}")
+                    else:
+                        # stock_info가 없으면 yfinance로 조회 (fallback)
+                        try:
+                            stock = yf.Ticker(ticker)
+                            info = stock.info
+                            if info and len(info) > 0:
+                                ticker_name = info.get('longName') or info.get('shortName') or info.get('symbol', ticker)
+                                logger.debug(f"종목명 조회 성공 (fallback): {ticker} -> {ticker_name}")
+                            else:
+                                ticker_name = ticker
+                        except Exception as e:
+                            logger.debug(f"종목명 조회 실패: {ticker} - {e}")
                             ticker_name = ticker
-                    except Exception as e:
-                        logger.debug(f"종목명 조회 실패: {ticker} - {e}")
-                        ticker_name = ticker
                 
                 # 가격 포맷팅 (티커 기준으로 통화 결정)
                 if isinstance(current_price, (int, float)):
@@ -1090,115 +1163,6 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
     return category_messages
 
 
-# 제거 예정: get_stock_summary_by_category()로 대체되어 사용되지 않음
-# main.py에서 get_stock_summary_by_category()를 사용하므로 이 함수는 더 이상 필요 없음
-def get_stock_summary(tickers: List[str]) -> str:
-    """
-    주가 데이터를 수집하고 요약 텍스트로 변환
-    Python 내부에서 모든 계산을 수행하여 AI에게는 완성된 텍스트만 전달
-    
-    Args:
-        tickers: 분석할 티커 리스트
-    
-    Returns:
-        주가 요약 텍스트 문자열
-    """
-    logger.info("=== 주가 데이터 수집 및 요약 시작 ===")
-    
-    results = analyze_all_tickers(tickers)
-    summary_lines = []
-    
-    # 티커 이름 매핑 (한글 이름 추가)
-    ticker_names = {
-        # 국내 보유
-        '360200.KS': 'ACE 미국S&P500',
-        '379810.KS': 'KODEX 미국나스닥100',
-        '484320.KS': 'KODEX 미국AI전력핵심인프라',
-        '411060.KS': 'ACE KRX금현물',
-        # 국내 관심
-        '449170.KS': 'TIGER KOFR금리액티브',
-        '005930.KS': '삼성전자',
-        '000660.KS': 'SK하이닉스',
-        # 해외 관심
-        'TSLA': '테슬라',
-        'NVDA': '엔비디아',
-        'AAPL': '애플',
-        'GOOGL': '구글',
-        'MSFT': '마이크로소프트',
-        'SPY': '미국S&P500',
-        'QQQ': '미국나스닥100',
-        'VTI': '미국주식시장지수펀드',
-        'IAU': '금',
-        'GLD': '금',
-        'SLV': '은',
-        'XAG': '은',
-        'XAU': '금',
-        'BTC-USD': '비트코인',
-        'ETH-USD': '이더리움',
-    }
-    
-    for result in results:
-        ticker = result.get('ticker', 'Unknown')
-        current_price = result.get('current_price', 'N/A')
-        returns = result.get('returns', {})
-        
-        # 티커 한글 이름
-        ticker_name = ticker_names.get(ticker, ticker)
-        
-        # 가격 포맷팅 (티커 기준으로 통화 결정)
-        if isinstance(current_price, (int, float)):
-            # 한국 주식/ETF는 원화, 그 외는 달러
-            if 'KS' in ticker or 'KQ' in ticker:
-                # 한국 주식/ETF: 원화
-                price_str = f"<b>{current_price:,.0f}원</b>"
-            else:
-                # 해외 주식/ETF/암호화폐: 달러
-                if current_price >= 1:
-                    price_str = f"<b>${current_price:,.2f}</b>"
-                else:
-                    price_str = f"<b>${current_price:.4f}</b>"
-        else:
-            price_str = str(current_price)
-        
-        # 주요 수익률 계산 (Python 내부 연산 완료)
-        # [24h, 3d, 7d, 1m, 3m, 6m, 1y]
-        period_mapping = {
-            '24h': ('1D', '1일'),
-            '3d': ('3D', '3일'),
-            '7d': ('1W', '1주'),
-            '1m': ('1M', '1개월'),
-            '3m': ('3M', '3개월'),
-            '6m': ('6M', '6개월'),
-            '1y': ('1Y', '1년')
-        }
-        
-        # 가독성 향상을 위한 포맷팅
-        returns_parts = []
-        for period_key, (period_code, period_label) in period_mapping.items():
-            if period_code in returns:
-                val = returns[period_code]
-                if isinstance(val, (int, float)):
-                    arrow = "📈" if val >= 0 else "📉"
-                    sign = "+" if val >= 0 else ""
-                    returns_parts.append(f"{arrow} {period_label}: {sign}{val:.2f}%")
-        
-        # 가독성 향상: 여러 줄로 표시
-        if returns_parts:
-            returns_str = "\n    " + "\n    ".join(returns_parts)
-        else:
-            returns_str = "N/A"
-        
-        # 직관적이고 가독성 높은 요약 라인 생성 (HTML 강조 효과)
-        # 종목명과 티커명에 강조 효과 추가
-        summary_line = f"📊 <b>{ticker_name}</b> <code>({ticker})</code>\n   현재가: <b>{price_str}</b>\n   변동률:{returns_str}"
-        summary_lines.append(summary_line)
-    
-    result_text = "**주가 현황:**\n" + "\n".join(summary_lines)
-    logger.info(f"주가 요약 텍스트 생성 완료: {len(summary_lines)}개 종목")
-    
-    return result_text
-
-
 def calculate_indicators(hist: pd.DataFrame) -> Dict:
     """
     Pandas를 사용하여 기술적 지표(RSI, 이격도) 직접 계산
@@ -1276,11 +1240,25 @@ def get_technical_summary(symbol: str) -> str:
         return "N/A (금리형 ETF - 매일 상승)"
     
     try:
-        # yfinance로 데이터 가져오기 (이미 세션 캐싱됨)
-        ticker = yf.Ticker(symbol)
-        # RSI, MA 계산을 위해 최소 2달치 데이터 필요
-        # 배당/분할 반영을 위해 auto_adjust=True 사용
-        hist = ticker.history(period="3mo", auto_adjust=True)
+        # 캐시 확인: calculate_returns에서 이미 가져온 데이터가 있는지 확인
+        hist = None
+        with _yfinance_cache_lock:
+            if symbol in _yfinance_cache:
+                cached_data = _yfinance_cache[symbol]
+                # 3개월치 데이터가 필요하므로, 캐시된 1년치 데이터에서 최근 3개월만 추출
+                if 'hist_data' in cached_data and cached_data['hist_data'] is not None:
+                    cached_hist = cached_data['hist_data']
+                    if len(cached_hist) >= 60:  # 최소 60거래일 필요
+                        # 최근 3개월치만 추출 (약 60거래일)
+                        hist = cached_hist.tail(60)
+                        logger.debug(f"{symbol}: 캐시된 데이터 재사용 (get_technical_summary)")
+        
+        # 캐시에 없으면 yfinance로 데이터 가져오기
+        if hist is None or hist.empty:
+            ticker = yf.Ticker(symbol)
+            # RSI, MA 계산을 위해 최소 2달치 데이터 필요
+            # 배당/분할 반영을 위해 auto_adjust=True 사용
+            hist = ticker.history(period="3mo", auto_adjust=True)
         
         if hist.empty:
             return "N/A (No Data)"
@@ -1334,10 +1312,24 @@ def get_tradingview_technical_summary(tickers: List[str]) -> str:
                 logger.debug(f"{ticker}: 암호화폐는 지원하지 않음, 스킵")
                 continue
             
-            # yfinance로 데이터 가져오기
-            ticker_obj = yf.Ticker(ticker)
-            # 배당/분할 반영을 위해 auto_adjust=True 사용
-            hist = ticker_obj.history(period="3mo", auto_adjust=True)
+            # 캐시 확인: calculate_returns에서 이미 가져온 데이터가 있는지 확인
+            hist = None
+            with _yfinance_cache_lock:
+                if ticker in _yfinance_cache:
+                    cached_data = _yfinance_cache[ticker]
+                    # 3개월치 데이터가 필요하므로, 캐시된 1년치 데이터에서 최근 3개월만 추출
+                    if 'hist_data' in cached_data and cached_data['hist_data'] is not None:
+                        cached_hist = cached_data['hist_data']
+                        if len(cached_hist) >= 60:  # 최소 60거래일 필요
+                            # 최근 3개월치만 추출 (약 60거래일)
+                            hist = cached_hist.tail(60)
+                            logger.debug(f"{ticker}: 캐시된 데이터 재사용 (3개월치 추출)")
+            
+            # 캐시에 없으면 yfinance로 데이터 가져오기
+            if hist is None or hist.empty:
+                ticker_obj = yf.Ticker(ticker)
+                # 배당/분할 반영을 위해 auto_adjust=True 사용
+                hist = ticker_obj.history(period="3mo", auto_adjust=True)
             
             if hist.empty or len(hist) < 20:
                 signals.append(f"- {ticker}: N/A (데이터 부족)")
