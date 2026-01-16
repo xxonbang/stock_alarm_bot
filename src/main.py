@@ -173,7 +173,7 @@ def main():
         
         # Step 7: AI 일일 리포트 생성 (최종 1회 API 호출)
         logger.info("\n[Step 7] AI 일일 리포트 생성 시작 (최종 1회 API 호출)...")
-        ai_briefing, token_usage = researcher.generate_briefing(collected_data)
+        compact_briefing, detailed_briefing, token_usage = researcher.generate_briefing(collected_data)
         logger.info("AI 일일 리포트 생성 완료")
         
         # Step 8: 텔레그램 발송 (각 카테고리별로 개별 메시지 전송)
@@ -328,15 +328,37 @@ KRX Data Marketplace에서 인증키 상태를 확인하고 갱신해 주세요.
             messages_failed += 1
             logger.error("❌ Hot/인기 뉴스 메시지 발송 실패")
         
-        # 4. AI 투자 인사이트 메시지 전송
-        ai_briefing_html = f"<b>🤖 AI 투자 인사이트</b>\n{ai_briefing}"
-        ai_message = ai_briefing_html
-        if notifier.send_message(ai_message):
+        # 4. AI 투자 인사이트 메시지 전송 (Compact 먼저, 그 다음 Detailed)
+        # 4-1. Compact 리포트 전송
+        if compact_briefing:
+            compact_briefing_html = f"<b>📱 AI 투자 인사이트 (Compact)</b>\n{compact_briefing}"
+            compact_message = compact_briefing_html
+            if notifier.send_message(compact_message):
+                messages_sent += 1
+                logger.info("✅ AI 투자 인사이트 (Compact) 메시지 발송 성공")
+            else:
+                messages_failed += 1
+                logger.error("❌ AI 투자 인사이트 (Compact) 메시지 발송 실패")
+        
+        # 4-2. 구분선 메시지 전송
+        separator_message = "<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n<b>📊 상세 분석 리포트</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>"
+        if notifier.send_message(separator_message):
             messages_sent += 1
-            logger.info("✅ AI 투자 인사이트 메시지 발송 성공")
+            logger.info("✅ AI 리포트 구분선 메시지 발송 성공")
         else:
             messages_failed += 1
-            logger.error("❌ AI 투자 인사이트 메시지 발송 실패")
+            logger.error("❌ AI 리포트 구분선 메시지 발송 실패")
+        
+        # 4-3. Detailed 리포트 전송
+        if detailed_briefing:
+            detailed_briefing_html = f"<b>🤖 AI 투자 인사이트 (Detailed)</b>\n{detailed_briefing}"
+            detailed_message = detailed_briefing_html
+            if notifier.send_message(detailed_message):
+                messages_sent += 1
+                logger.info("✅ AI 투자 인사이트 (Detailed) 메시지 발송 성공")
+            else:
+                messages_failed += 1
+                logger.error("❌ AI 투자 인사이트 (Detailed) 메시지 발송 실패")
         
         # 5. 바리케이트 메시지 전송 (메시지 뭉치 종료 표시) - 토큰 사용량 정보 포함
         token_info_text = ""
