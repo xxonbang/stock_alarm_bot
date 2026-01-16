@@ -37,9 +37,15 @@ class AIResearcher:
             # 현재 지원되는 최신 모델 사용
             self.model_name = 'gemini-2.5-flash'
             self.current_api_key = api_key
-            key_label = "01" if api_key == self.api_key else "02"
-            logger.info(f"✅ Google GenAI v2 클라이언트 초기화 완료 ({key_label}번 키): {self.model_name}")
-            print(f"✅ Google GenAI v2 클라이언트 초기화 완료 ({key_label}번 키): {self.model_name}")
+            # 현재 사용 중인 키가 기본 키인지 fallback 키인지 확인
+            if api_key == self.api_key:
+                key_label = "기본"
+            elif api_key == self.fallback_api_key:
+                key_label = "Fallback"
+            else:
+                key_label = "알 수 없음"
+            logger.info(f"✅ Google GenAI v2 클라이언트 초기화 완료 ({key_label} 키): {self.model_name}")
+            print(f"✅ Google GenAI v2 클라이언트 초기화 완료 ({key_label} 키): {self.model_name}")
         except Exception as e:
             error_msg = f"Google GenAI 클라이언트 초기화 실패: {str(e)[:200]}"
             logger.error(error_msg)
@@ -47,15 +53,22 @@ class AIResearcher:
             raise RuntimeError(error_msg)
     
     def _switch_to_fallback(self):
-        """Fallback API 키로 전환"""
-        if self.fallback_api_key and self.current_api_key != self.fallback_api_key:
-            logger.warning("⚠️ 기본 API 키 실패, Fallback API 키(02번)로 전환 시도...")
-            print("⚠️ 기본 API 키 실패, Fallback API 키(02번)로 전환 시도...")
+        """
+        Fallback API 키로 전환 (양방향 지원)
+        
+        - 현재 기본 키를 사용 중이고 fallback 키가 있으면 → fallback 키로 전환
+        - 현재 fallback 키를 사용 중이고 기본 키가 있으면 → 기본 키로 전환
+        """
+        # 현재 기본 키를 사용 중이고 fallback 키가 있으면 fallback 키로 전환
+        if self.current_api_key == self.api_key and self.fallback_api_key:
+            logger.warning("⚠️ 기본 API 키 실패, Fallback API 키로 전환 시도...")
+            print("⚠️ 기본 API 키 실패, Fallback API 키로 전환 시도...")
             self._initialize_client(self.fallback_api_key)
             return True
-        elif self.api_key and self.current_api_key != self.api_key:
-            logger.warning("⚠️ Fallback API 키 실패, 기본 API 키(01번)로 전환 시도...")
-            print("⚠️ Fallback API 키 실패, 기본 API 키(01번)로 전환 시도...")
+        # 현재 fallback 키를 사용 중이고 기본 키가 있으면 기본 키로 전환
+        elif self.current_api_key == self.fallback_api_key and self.api_key:
+            logger.warning("⚠️ Fallback API 키 실패, 기본 API 키로 전환 시도...")
+            print("⚠️ Fallback API 키 실패, 기본 API 키로 전환 시도...")
             self._initialize_client(self.api_key)
             return True
         return False
@@ -162,17 +175,21 @@ class AIResearcher:
                 
                 # API 키 fallback 시도 (429 에러 또는 할당량 초과 시)
                 if is_quota_exceeded and attempt == 0:
-                    # 첫 시도에서 할당량 초과 시 fallback 키로 전환 시도
-                    if self._switch_to_fallback():
-                        logger.info("Fallback API 키로 재시도...")
-                        print("🔄 Fallback API 키로 재시도...")
-                        continue
-                elif is_quota_exceeded and attempt == 1 and self.current_api_key == self.fallback_api_key:
-                    # Fallback 키도 실패 시 기본 키로 다시 시도
-                    if self._switch_to_fallback():
-                        logger.info("기본 API 키로 재시도...")
-                        print("🔄 기본 API 키로 재시도...")
-                        continue
+                    # 첫 시도에서 할당량 초과 시
+                    # 현재 기본 키를 사용 중이면 fallback 키로 전환
+                    if self.current_api_key == self.api_key and self.fallback_api_key:
+                        if self._switch_to_fallback():
+                            logger.info("Fallback API 키로 재시도...")
+                            print("🔄 Fallback API 키로 재시도...")
+                            continue
+                elif is_quota_exceeded and attempt == 1:
+                    # 두 번째 시도에서도 할당량 초과 시
+                    # 현재 fallback 키를 사용 중이면 기본 키로 전환
+                    if self.current_api_key == self.fallback_api_key and self.api_key:
+                        if self._switch_to_fallback():
+                            logger.info("기본 API 키로 재시도...")
+                            print("🔄 기본 API 키로 재시도...")
+                            continue
                 
                 if is_quota_exceeded and attempt >= max_retries - 1:
                     # 모든 재시도 실패 후 최종 실패
