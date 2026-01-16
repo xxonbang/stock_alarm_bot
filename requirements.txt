@@ -23,9 +23,6 @@ pytz>=2023.3
 # FRED API (연준 데이터)
 fredapi>=0.5.1
 
-# TradingView 기술적 분석
-tradingview-ta>=3.3.0
-
 # RSS 피드 파싱
 feedparser>=6.0.10
 
