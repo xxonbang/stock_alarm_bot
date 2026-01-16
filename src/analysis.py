@@ -26,8 +26,10 @@ logger = logging.getLogger(__name__)
 
 # yfinance 데이터 캐시 (티커별로 history 데이터 캐싱하여 중복 호출 방지)
 # 멀티스레딩 환경에서의 안전성을 위해 Lock 사용
+# TTL: 1시간 (3600초) - 캐시 데이터 유효기간
 _yfinance_cache = {}  # {ticker: {'hist_data': DataFrame, 'info': dict, 'timestamp': datetime}}
 _yfinance_cache_lock = threading.Lock()  # 캐시 쓰기 보호용 Lock
+_CACHE_TTL_SECONDS = 3600  # 1시간
 
 # AI 금지 검증: 이 파일에서 직접 import하지 않았는지 확인
 # (다른 모듈에서 간접적으로 import되는 것은 허용)
@@ -83,10 +85,18 @@ def get_current_price(ticker: str, hist_data: Optional[pd.DataFrame] = None) -> 
         with _yfinance_cache_lock:
             if ticker in _yfinance_cache:
                 cached_data = _yfinance_cache[ticker]
-                if 'hist_data' in cached_data and cached_data['hist_data'] is not None:
-                    cached_hist = cached_data['hist_data']
-                    if not cached_hist.empty:
-                        return float(cached_hist['Close'].iloc[-1])
+                # TTL 체크: 캐시가 만료되었는지 확인
+                cache_timestamp = cached_data.get('timestamp')
+                if cache_timestamp:
+                    age_seconds = (datetime.now() - cache_timestamp).total_seconds()
+                    if age_seconds > _CACHE_TTL_SECONDS:
+                        # 캐시 만료 - 삭제
+                        del _yfinance_cache[ticker]
+                        logger.debug(f"{ticker}: 캐시 만료 (TTL: {_CACHE_TTL_SECONDS}초, 경과: {age_seconds:.0f}초)")
+                    elif 'hist_data' in cached_data and cached_data['hist_data'] is not None:
+                        cached_hist = cached_data['hist_data']
+                        if not cached_hist.empty:
+                            return float(cached_hist['Close'].iloc[-1])
         
         stock = get_stock_data(ticker)
         if stock is None:
@@ -385,11 +395,31 @@ def calculate_advanced_indicators(ticker: str, hist_data: Optional[pd.DataFrame]
     
     try:
         if hist_data is None:
-            stock = get_stock_data(ticker)
-            if stock is None:
-                return result
-            # 52주 신고가를 위해 1년치 데이터 필요
-            hist_data = stock.history(period="1y", auto_adjust=True)
+            # 캐시 확인: calculate_returns에서 이미 가져온 데이터가 있는지 확인
+            with _yfinance_cache_lock:
+                if ticker in _yfinance_cache:
+                    cached_data = _yfinance_cache[ticker]
+                    # TTL 체크: 캐시가 만료되었는지 확인
+                    cache_timestamp = cached_data.get('timestamp')
+                    if cache_timestamp:
+                        age_seconds = (datetime.now() - cache_timestamp).total_seconds()
+                        if age_seconds > _CACHE_TTL_SECONDS:
+                            # 캐시 만료 - 삭제
+                            del _yfinance_cache[ticker]
+                            logger.debug(f"{ticker}: 캐시 만료 (TTL: {_CACHE_TTL_SECONDS}초, 경과: {age_seconds:.0f}초)")
+                        elif 'hist_data' in cached_data and cached_data['hist_data'] is not None:
+                            cached_hist = cached_data['hist_data']
+                            if len(cached_hist) >= 20:  # 최소 20거래일 필요
+                                hist_data = cached_hist
+                                logger.debug(f"{ticker}: 캐시된 데이터 재사용 (calculate_advanced_indicators)")
+            
+            # 캐시에 없으면 yfinance로 데이터 가져오기
+            if hist_data is None or hist_data.empty:
+                stock = get_stock_data(ticker)
+                if stock is None:
+                    return result
+                # 52주 신고가를 위해 1년치 데이터 필요
+                hist_data = stock.history(period="1y", auto_adjust=True)
         
         if hist_data.empty or len(hist_data) < 20:
             logger.warning(f"{ticker}: 고급 지표 계산을 위한 데이터 부족 ({len(hist_data)}일)")
@@ -868,35 +898,8 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
         }
     """
     # 티커 이름 매핑 (한글 이름이 있는 경우만, 없으면 yfinance로 동적 조회)
-    ticker_names = {
-        # 국내 보유
-        '360200.KS': 'ACE 미국S&P500',
-        '379810.KS': 'KODEX 미국나스닥100',
-        '390390.KS': 'KODEX 미국반도체',
-        '465580.KS': 'KODEX ACE 미국빅테크TOP7 Plus',
-        '484320.KS': 'KODEX 미국AI전력핵심인프라',
-        '411060.KS': 'ACE KRX금현물',
-        '438080.KS': 'ACE 미국S&P500미국채혼합50액티브',
-        '487230.KS': 'KODEX 미국AI전력핵심인프라',
-        # 국내 관심
-        '449170.KS': 'TIGER KOFR금리액티브',
-        '464310.KS': 'TIGER 글로벌AI&로보틱스 INDXX',
-        '005930.KS': '삼성전자',
-        '000660.KS': 'SK하이닉스',
-        # 해외 관심
-        'TSLA': '테슬라',
-        'NVDA': '엔비디아',
-        'AAPL': '애플',
-        'GOOGL': '구글',
-        'MSFT': '마이크로소프트',
-        'SPY': '미국S&P500',
-        'QQQ': '미국나스닥100',
-        'VTI': '미국주식시장지수펀드',
-        'GLD': '금 (SPDR Gold Trust)',
-        'SLV': '은 (iShares Silver Trust)',
-        'BTC-USD': '비트코인',
-        'ETH-USD': '이더리움',
-    }
+    # 티커 이름 매핑은 공통 모듈에서 가져오기
+    from config.ticker_names import get_ticker_name
     
     # 카테고리별 메시지 저장
     category_messages = {}
@@ -921,7 +924,7 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 technical = result.get('technical', {})
                 
                 # 티커 한글 이름 (매핑에 없으면 calculate_returns에서 가져온 stock_info 재사용)
-                ticker_name = ticker_names.get(ticker)
+                ticker_name = get_ticker_name(ticker)
                 if not ticker_name or ticker_name == ticker:
                     # calculate_returns에서 이미 가져온 stock_info 재사용 (중복 호출 방지)
                     stock_info = result.get('stock_info')
@@ -1287,13 +1290,20 @@ def get_technical_summary(symbol: str) -> str:
         with _yfinance_cache_lock:
             if symbol in _yfinance_cache:
                 cached_data = _yfinance_cache[symbol]
-                # 3개월치 데이터가 필요하므로, 캐시된 1년치 데이터에서 최근 3개월만 추출
-                if 'hist_data' in cached_data and cached_data['hist_data'] is not None:
-                    cached_hist = cached_data['hist_data']
-                    if len(cached_hist) >= 60:  # 최소 60거래일 필요
-                        # 최근 3개월치만 추출 (약 60거래일)
-                        hist = cached_hist.tail(60)
-                        logger.debug(f"{symbol}: 캐시된 데이터 재사용 (get_technical_summary)")
+                # TTL 체크: 캐시가 만료되었는지 확인
+                cache_timestamp = cached_data.get('timestamp')
+                if cache_timestamp:
+                    age_seconds = (datetime.now() - cache_timestamp).total_seconds()
+                    if age_seconds > _CACHE_TTL_SECONDS:
+                        # 캐시 만료 - 삭제
+                        del _yfinance_cache[symbol]
+                        logger.debug(f"{symbol}: 캐시 만료 (TTL: {_CACHE_TTL_SECONDS}초, 경과: {age_seconds:.0f}초)")
+                    elif 'hist_data' in cached_data and cached_data['hist_data'] is not None:
+                        cached_hist = cached_data['hist_data']
+                        if len(cached_hist) >= 60:  # 최소 60거래일 필요
+                            # 최근 3개월치만 추출 (약 60거래일)
+                            hist = cached_hist.tail(60)
+                            logger.debug(f"{symbol}: 캐시된 데이터 재사용 (get_technical_summary)")
         
         # 캐시에 없으면 yfinance로 데이터 가져오기
         if hist is None or hist.empty:
@@ -1359,13 +1369,20 @@ def get_tradingview_technical_summary(tickers: List[str]) -> str:
             with _yfinance_cache_lock:
                 if ticker in _yfinance_cache:
                     cached_data = _yfinance_cache[ticker]
-                    # 3개월치 데이터가 필요하므로, 캐시된 1년치 데이터에서 최근 3개월만 추출
-                    if 'hist_data' in cached_data and cached_data['hist_data'] is not None:
-                        cached_hist = cached_data['hist_data']
-                        if len(cached_hist) >= 60:  # 최소 60거래일 필요
-                            # 최근 3개월치만 추출 (약 60거래일)
-                            hist = cached_hist.tail(60)
-                            logger.debug(f"{ticker}: 캐시된 데이터 재사용 (3개월치 추출)")
+                    # TTL 체크: 캐시가 만료되었는지 확인
+                    cache_timestamp = cached_data.get('timestamp')
+                    if cache_timestamp:
+                        age_seconds = (datetime.now() - cache_timestamp).total_seconds()
+                        if age_seconds > _CACHE_TTL_SECONDS:
+                            # 캐시 만료 - 삭제
+                            del _yfinance_cache[ticker]
+                            logger.debug(f"{ticker}: 캐시 만료 (TTL: {_CACHE_TTL_SECONDS}초, 경과: {age_seconds:.0f}초)")
+                        elif 'hist_data' in cached_data and cached_data['hist_data'] is not None:
+                            cached_hist = cached_data['hist_data']
+                            if len(cached_hist) >= 60:  # 최소 60거래일 필요
+                                # 최근 3개월치만 추출 (약 60거래일)
+                                hist = cached_hist.tail(60)
+                                logger.debug(f"{ticker}: 캐시된 데이터 재사용 (3개월치 추출)")
             
             # 캐시에 없으면 yfinance로 데이터 가져오기
             if hist is None or hist.empty:

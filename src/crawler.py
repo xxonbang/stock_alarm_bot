@@ -286,29 +286,14 @@ def filter_relevant_news(news_items: List[Dict], max_items: int = 7) -> List[Dic
         portfolio_tickers = settings.tickers
         
         # 티커를 기업명으로 매핑 (기본 매핑)
-        ticker_name_mapping = {
-            # 해외 종목
-            'TSLA': ['tesla', '테슬라'],
-            'NVDA': ['nvidia', '엔비디아'],
-            'AAPL': ['apple', '애플'],
-            'GOOGL': ['google', 'alphabet', '구글'],
-            'MSFT': ['microsoft', '마이크로소프트'],
-            'SPY': ['s&p 500', 'sp500', 's&p500'],
-            'QQQ': ['nasdaq', '나스닥'],
-            'VTI': ['total stock market', 'vanguard total'],
-            'GLD': ['gold', 'spdr gold', '금'],
-            'SLV': ['silver', 'ishares silver', '은'],
-            'BTC-USD': ['bitcoin', 'btc', '비트코인'],
-            'ETH-USD': ['ethereum', 'eth', '이더리움'],
-            # 국내 종목
-            '005930.KS': ['samsung', '삼성전자', '삼성'],
-            '000660.KS': ['sk hynix', 'hynix', 'sk하이닉스', '하이닉스'],
-        }
+        # 티커 이름 매핑은 공통 모듈에서 가져오기
+        from config.ticker_names import get_ticker_keywords
         
         # 포트폴리오 티커에 대한 기업명 수집
         for ticker in portfolio_tickers:
-            if ticker in ticker_name_mapping:
-                portfolio_names[ticker] = ticker_name_mapping[ticker]
+            keywords = get_ticker_keywords(ticker)
+            if keywords:
+                portfolio_names[ticker] = keywords
             else:
                 # 기본 티커명도 추가 (대소문자 구분 없이)
                 ticker_clean = ticker.replace('.KS', '').replace('.KQ', '').replace('-USD', '')
@@ -1999,8 +1984,30 @@ def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optio
                             # 티커 코드가 ISU_CD에 포함되거나, ISU_CD 끝부분이 티커 코드와 일치하는지 확인
                             if code in response_isu_cd or response_isu_cd.endswith(code) or response_isu_cd == code:
                                 # 컬럼명은 실제 API 응답에 맞게 수정 필요
-                                foreign_value = float(row.get('외국인순매수', 0) or row.get('FRGN_NTBY_QTY', 0) or 0)
-                                inst_value = float(row.get('기관순매수', 0) or row.get('ORG_NTBY_QTY', 0) or 0)
+                                # 타입 검증 강화: row.get()이 문자열을 반환할 수 있으므로 타입 체크
+                                foreign_raw = row.get('외국인순매수') or row.get('FRGN_NTBY_QTY') or 0
+                                inst_raw = row.get('기관순매수') or row.get('ORG_NTBY_QTY') or 0
+                                
+                                # 타입 검증 및 변환
+                                try:
+                                    if isinstance(foreign_raw, (int, float)):
+                                        foreign_value = float(foreign_raw)
+                                    elif isinstance(foreign_raw, str):
+                                        foreign_value = float(str(foreign_raw).replace(',', ''))
+                                    else:
+                                        foreign_value = 0.0
+                                except (ValueError, TypeError):
+                                    foreign_value = 0.0
+                                
+                                try:
+                                    if isinstance(inst_raw, (int, float)):
+                                        inst_value = float(inst_raw)
+                                    elif isinstance(inst_raw, str):
+                                        inst_value = float(str(inst_raw).replace(',', ''))
+                                    else:
+                                        inst_value = 0.0
+                                except (ValueError, TypeError):
+                                    inst_value = 0.0
                                 
                                 # 거래량 추출 (ACC_TRDVOL) - 1일치와 3일치 모두 수집
                                 volume_str = row.get('ACC_TRDVOL') or row.get('거래량') or None
@@ -2374,11 +2381,12 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
     
     try:
         # 1. 수급 데이터 수집 (외인/기관 순매매량)
-        # KRX API에서 이미 데이터를 가져온 경우 스킵 (단, 0.0이 아닌 경우만)
-        # KRX API가 0.0을 반환하면 네이버 크롤링으로 fallback
+        # KRX API에서 이미 데이터를 가져온 경우 스킵 (None이 아닌 경우만)
+        # 0.0은 유효한 데이터로 간주 (실제로 외/기 거래가 없는 경우)
+        # None만 fallback 대상으로 처리
         krx_has_data = (
-            (result.get('foreign_net') is not None and result.get('foreign_net') != 0.0) or
-            (result.get('institutional_net') is not None and result.get('institutional_net') != 0.0)
+            result.get('foreign_net') is not None or
+            result.get('institutional_net') is not None
         )
         if not krx_has_data:
             try:
@@ -2523,10 +2531,11 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                             continue
                 
                 if count > 0:
-                    # 네이버 크롤링 데이터로 덮어쓰기 (KRX API가 0.0을 반환한 경우 대체)
+                    # 네이버 크롤링 데이터로 덮어쓰기 (KRX API가 None을 반환한 경우 대체)
+                    # 0.0은 유효한 데이터로 간주하므로 유지
                     # 3일치 합계
-                    result['foreign_net'] = round(foreign_net_sum, 2) if foreign_net_sum != 0.0 else (result.get('foreign_net') or 0.0)
-                    result['institutional_net'] = round(institutional_net_sum, 2) if institutional_net_sum != 0.0 else (result.get('institutional_net') or 0.0)
+                    result['foreign_net'] = round(foreign_net_sum, 2) if foreign_net_sum != 0.0 else (result.get('foreign_net') if result.get('foreign_net') is not None else 0.0)
+                    result['institutional_net'] = round(institutional_net_sum, 2) if institutional_net_sum != 0.0 else (result.get('institutional_net') if result.get('institutional_net') is not None else 0.0)
                     # 1일치
                     if foreign_net_1d is not None:
                         result['foreign_net_1d'] = round(foreign_net_1d, 2)
@@ -2534,12 +2543,13 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                         result['institutional_net_1d'] = round(institutional_net_1d, 2)
                     logger.debug(f"{ticker_code} 수급 데이터 (네이버): 외인(3일) {result['foreign_net']:.2f}만주, 기관(3일) {result['institutional_net']:.2f}만주, 외인(1일) {result.get('foreign_net_1d', 'N/A')}, 기관(1일) {result.get('institutional_net_1d', 'N/A')}")
                 else:
-                    # 네이버 크롤링 실패 시, KRX API 데이터가 0.0이 아니면 유지
-                    if result.get('foreign_net') is None or result.get('foreign_net') == 0.0:
+                    # 네이버 크롤링 실패 시, KRX API 데이터가 None이 아니면 유지
+                    # 0.0은 유효한 데이터로 간주하므로 유지
+                    if result.get('foreign_net') is None:
                         result['foreign_net'] = None
-                    if result.get('institutional_net') is None or result.get('institutional_net') == 0.0:
+                    if result.get('institutional_net') is None:
                         result['institutional_net'] = None
-                    if (result.get('foreign_net') is None or result.get('foreign_net') == 0.0) and (result.get('institutional_net') is None or result.get('institutional_net') == 0.0):
+                    if result.get('foreign_net') is None and result.get('institutional_net') is None:
                         logger.warning(f"{ticker_code}: 수급 데이터를 찾을 수 없음")
                     
             except Exception as e:
