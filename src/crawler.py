@@ -2348,28 +2348,27 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
             except Exception as e:
                 logger.debug(f"{ticker_code}: ETF API 호출 실패 (일반 주식일 가능성): {e}")
             
-            # 일반 주식인 경우에만 유가증권 일별매매정보 API 호출 (수급 데이터 수집)
-            if not is_etf:
-                try:
-                    krx_data = get_kr_stock_data_krx_api(ticker_code, settings.krx_api_key)
-                    # KRX API에서 데이터를 성공적으로 가져온 경우 (1일치와 3일치 모두)
-                    if krx_data.get('foreign_net') is not None or krx_data.get('institutional_net') is not None:
-                        result['foreign_net'] = krx_data.get('foreign_net')
-                        result['institutional_net'] = krx_data.get('institutional_net')
-                        logger.debug(f"{ticker_code}: KRX API로 수급 데이터(3일) 수집 성공")
-                    if krx_data.get('foreign_net_1d') is not None or krx_data.get('institutional_net_1d') is not None:
-                        result['foreign_net_1d'] = krx_data.get('foreign_net_1d')
-                        result['institutional_net_1d'] = krx_data.get('institutional_net_1d')
-                        logger.debug(f"{ticker_code}: KRX API로 수급 데이터(1일) 수집 성공")
-                    # 거래량도 함께 저장 (ETF가 아닌 경우, 1일치와 3일치 모두)
+            # ETF든 일반 주식이든 외/기 수급 데이터는 수집 (ETF도 외/기 거래가 있을 수 있음)
+            # 단, ETF는 괴리율 데이터를 이미 수집했으므로 일반 주식 API는 수급 데이터만 수집
+            try:
+                krx_data = get_kr_stock_data_krx_api(ticker_code, settings.krx_api_key)
+                # KRX API에서 데이터를 성공적으로 가져온 경우 (1일치와 3일치 모두)
+                if krx_data.get('foreign_net') is not None or krx_data.get('institutional_net') is not None:
+                    result['foreign_net'] = krx_data.get('foreign_net')
+                    result['institutional_net'] = krx_data.get('institutional_net')
+                    logger.debug(f"{ticker_code}: KRX API로 수급 데이터(3일) 수집 성공")
+                if krx_data.get('foreign_net_1d') is not None or krx_data.get('institutional_net_1d') is not None:
+                    result['foreign_net_1d'] = krx_data.get('foreign_net_1d')
+                    result['institutional_net_1d'] = krx_data.get('institutional_net_1d')
+                    logger.debug(f"{ticker_code}: KRX API로 수급 데이터(1일) 수집 성공")
+                # 거래량도 함께 저장 (ETF가 아닌 경우만, ETF는 이미 ETF API에서 수집)
+                if not is_etf:
                     if krx_data.get('total_volume') is not None:
                         result['total_volume'] = krx_data.get('total_volume')
                     if krx_data.get('total_volume_1d') is not None:
                         result['total_volume_1d'] = krx_data.get('total_volume_1d')
-                except Exception as e:
-                    logger.debug(f"{ticker_code}: KRX API 수급 데이터 실패, 네이버 크롤링으로 대체: {e}")
-            else:
-                logger.debug(f"{ticker_code}: 일반 주식으로 확인됨, ETF 괴리율 수집 스킵")
+            except Exception as e:
+                logger.debug(f"{ticker_code}: KRX API 수급 데이터 실패, 네이버 크롤링으로 대체: {e}")
     except (ImportError, AttributeError) as e:
         logger.debug(f"KRX API 설정 확인 실패 (정상, 기존 방식 사용): {e}")
     
