@@ -118,14 +118,118 @@ def calculate_rsi(prices: pd.Series, period: int = 14) -> Optional[float]:
         return None
 
 
+def calculate_macd(prices: pd.Series, fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> Dict[str, Optional[float]]:
+    """
+    MACD (Moving Average Convergence Divergence) 계산
+
+    Gerald Appel이 1970년대 개발한 추세 추종 모멘텀 지표입니다.
+    - MACD Line: 단기 EMA와 장기 EMA의 차이
+    - Signal Line: MACD Line의 EMA
+    - Histogram: MACD Line과 Signal Line의 차이
+
+    Args:
+        prices: 종가 시리즈
+        fast_period: 단기 EMA 기간 (기본값: 12일)
+        slow_period: 장기 EMA 기간 (기본값: 26일)
+        signal_period: Signal Line EMA 기간 (기본값: 9일)
+
+    Returns:
+        {
+            'macd_line': MACD Line 값,
+            'signal_line': Signal Line 값,
+            'histogram': Histogram 값 (MACD - Signal),
+            'trend': 추세 판단 ('상승', '하락', '중립')
+        }
+    """
+    result = {
+        'macd_line': None,
+        'signal_line': None,
+        'histogram': None,
+        'trend': None
+    }
+
+    try:
+        # 최소 데이터 요구: slow_period + signal_period
+        min_required = slow_period + signal_period
+        if len(prices) < min_required:
+            logger.debug(f"MACD 계산: 데이터 부족 ({len(prices)}일 < {min_required}일 필요)")
+            return result
+
+        # EMA 계산 (pandas ewm 사용)
+        # span = period, adjust=False로 표준 EMA 계산
+        ema_fast = prices.ewm(span=fast_period, adjust=False).mean()
+        ema_slow = prices.ewm(span=slow_period, adjust=False).mean()
+
+        # MACD Line = 단기 EMA - 장기 EMA
+        macd_line = ema_fast - ema_slow
+
+        # Signal Line = MACD Line의 EMA
+        signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+
+        # Histogram = MACD Line - Signal Line
+        histogram = macd_line - signal_line
+
+        # 최신 값 추출
+        current_macd = float(macd_line.iloc[-1])
+        current_signal = float(signal_line.iloc[-1])
+        current_histogram = float(histogram.iloc[-1])
+
+        # NaN 체크
+        if pd.isna(current_macd) or pd.isna(current_signal) or pd.isna(current_histogram):
+            return result
+
+        result['macd_line'] = round(current_macd, 4)
+        result['signal_line'] = round(current_signal, 4)
+        result['histogram'] = round(current_histogram, 4)
+
+        # 추세 판단
+        # - MACD > Signal: 상승 추세 (골든크로스 상태)
+        # - MACD < Signal: 하락 추세 (데드크로스 상태)
+        # - Histogram이 양수에서 증가: 상승 모멘텀 강화
+        # - Histogram이 음수에서 감소: 하락 모멘텀 강화
+        if current_histogram > 0:
+            # 이전 Histogram과 비교하여 모멘텀 판단
+            if len(histogram) >= 2:
+                prev_histogram = float(histogram.iloc[-2])
+                if not pd.isna(prev_histogram):
+                    if current_histogram > prev_histogram:
+                        result['trend'] = '상승↑'  # 상승 모멘텀 강화
+                    else:
+                        result['trend'] = '상승'   # 상승 모멘텀 약화
+                else:
+                    result['trend'] = '상승'
+            else:
+                result['trend'] = '상승'
+        elif current_histogram < 0:
+            if len(histogram) >= 2:
+                prev_histogram = float(histogram.iloc[-2])
+                if not pd.isna(prev_histogram):
+                    if current_histogram < prev_histogram:
+                        result['trend'] = '하락↓'  # 하락 모멘텀 강화
+                    else:
+                        result['trend'] = '하락'   # 하락 모멘텀 약화
+                else:
+                    result['trend'] = '하락'
+            else:
+                result['trend'] = '하락'
+        else:
+            result['trend'] = '중립'
+
+        return result
+
+    except Exception as e:
+        logger.error(f"MACD 계산 실패: {e}")
+        return result
+
+
 def calculate_ma_deviation(current_price: float, ma20: Optional[float]) -> Optional[float]:
     """
     20일 이동평균선 괴리율 계산
-    
+
     Args:
         current_price: 현재가
         ma20: 20일 이동평균선 가격
-    
+
     Returns:
         괴리율 (%) 또는 None
     """
@@ -300,17 +404,24 @@ def calculate_advanced_indicators(ticker: str, hist_data: Optional[pd.DataFrame]
 
 def get_technical_indicators(ticker: str, hist_data: Optional[pd.DataFrame] = None) -> Dict[str, Optional[float]]:
     """
-    기술적 지표 계산 (RSI, 20일 이동평균선, 괴리율)
-    
+    기술적 지표 계산 (RSI, 20일 이동평균선, 괴리율, MACD)
+
     Args:
         ticker: 주식 티커 심볼
         hist_data: 이미 가져온 히스토리 데이터 (Optional, 있으면 재호출 안 함)
-    
+
     Returns:
         {
             'rsi': RSI 값 (0~100),
             'ma20': 20일 이동평균선 가격,
-            'ma_deviation': 20일 이동평균선 괴리율 (%)
+            'ma_deviation': 20일 이동평균선 괴리율 (%),
+            'ma_disparity': 20일 이격도 (%),
+            'year_high_pos': 52주 신고가 대비 위치 (%),
+            'pullback_status': 눌림목 판별 결과,
+            'macd': MACD Line 값,
+            'macd_signal': Signal Line 값,
+            'macd_histogram': Histogram 값,
+            'macd_trend': MACD 추세 판단
         }
     """
     try:
@@ -320,7 +431,7 @@ def get_technical_indicators(ticker: str, hist_data: Optional[pd.DataFrame] = No
         else:
             stock = get_stock_data(ticker)
             if stock is None:
-                return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None}
+                return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None, 'macd': None, 'macd_signal': None, 'macd_histogram': None, 'macd_trend': None}
             
             # 최소 60일치 데이터 필요 (RSI 14일 + MA 20일 + MA 60일(눌림목) + 여유)
             # 배당/분할 반영을 위해 auto_adjust=True 사용
@@ -329,7 +440,7 @@ def get_technical_indicators(ticker: str, hist_data: Optional[pd.DataFrame] = No
         
         if hist.empty or len(hist) < 30:
             logger.warning(f"{ticker}: 기술적 지표 계산을 위한 데이터 부족 ({len(hist)}일)")
-            return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None}
+            return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None, 'macd': None, 'macd_signal': None, 'macd_histogram': None, 'macd_trend': None}
         
         # 데이터 정합성 체크 및 문제 행 제외
         # High >= Low, Close가 High/Low 범위 내 확인
@@ -360,7 +471,7 @@ def get_technical_indicators(ticker: str, hist_data: Optional[pd.DataFrame] = No
             # 데이터가 너무 적어지면 계산 불가
             if hist.empty or len(hist) < 20:
                 logger.warning(f"{ticker}: 정합성 문제 행 제외 후 데이터 부족 ({len(hist)}일)")
-                return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None}
+                return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None, 'macd': None, 'macd_signal': None, 'macd_histogram': None, 'macd_trend': None}
         
         # Close 가격 사용
         closes = hist['Close']
@@ -380,18 +491,25 @@ def get_technical_indicators(ticker: str, hist_data: Optional[pd.DataFrame] = No
         
         # 눌림목 판별
         pullback_status = calculate_pullback_status(hist)
-        
+
+        # MACD 계산
+        macd_data = calculate_macd(closes)
+
         return {
             'rsi': rsi,
             'ma20': ma20,
             'ma_deviation': ma_deviation,
             'ma_disparity': advanced.get('ma_disparity'),
             'year_high_pos': advanced.get('year_high_pos'),
-            'pullback_status': pullback_status
+            'pullback_status': pullback_status,
+            'macd': macd_data.get('macd_line'),
+            'macd_signal': macd_data.get('signal_line'),
+            'macd_histogram': macd_data.get('histogram'),
+            'macd_trend': macd_data.get('trend')
         }
     except Exception as e:
         logger.error(f"{ticker} 기술적 지표 계산 실패: {e}")
-        return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None}
+        return {'rsi': None, 'ma20': None, 'ma_deviation': None, 'ma_disparity': None, 'year_high_pos': None, 'pullback_status': None, 'macd': None, 'macd_signal': None, 'macd_histogram': None, 'macd_trend': None}
 
 
 def calculate_returns(ticker: str) -> Dict:
@@ -895,7 +1013,12 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 year_high_pos = technical.get('year_high_pos')
                 if year_high_pos is not None:
                     technical_parts.append(f"| <code>52주:{int(year_high_pos)}%</code>")
-                
+
+                # MACD 추세 표시
+                macd_trend = technical.get('macd_trend')
+                if macd_trend is not None:
+                    technical_parts.append(f"| <code>MACD:{macd_trend}</code>")
+
                 if technical_parts:
                     technical_str = "⚙️ " + " ".join(technical_parts)
                 else:
