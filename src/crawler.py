@@ -2415,6 +2415,9 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                 foreign_net_1d = None
                 institutional_net_1d = None
                 count = 0
+                # 실제 데이터 수집 성공 여부 추적 (0과 수집실패 구분)
+                foreign_data_found = False
+                institutional_data_found = False
                 
                 # 외인/기관 관련 테이블 찾기
                 tables = soup.select('table')
@@ -2510,9 +2513,11 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                             # 합계에 추가 (값이 있는 경우만)
                             if institutional_value is not None:
                                 institutional_net_sum += institutional_value
+                                institutional_data_found = True  # 실제 데이터 수집 성공
                             if foreign_value is not None:
                                 foreign_net_sum += foreign_value
-                            
+                                foreign_data_found = True  # 실제 데이터 수집 성공
+
                             # 1일치 저장 (최근 거래일만)
                             if count == 0:
                                 if institutional_value is not None:
@@ -2532,10 +2537,21 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                 
                 if count > 0:
                     # 네이버 크롤링 데이터로 덮어쓰기 (KRX API가 None을 반환한 경우 대체)
-                    # 0.0은 유효한 데이터로 간주하므로 유지
+                    # 실제 데이터 수집 성공 시 0.0도 유효한 값으로 처리 (수집실패와 구분)
                     # 3일치 합계
-                    result['foreign_net'] = round(foreign_net_sum, 2) if foreign_net_sum != 0.0 else (result.get('foreign_net') if result.get('foreign_net') is not None else 0.0)
-                    result['institutional_net'] = round(institutional_net_sum, 2) if institutional_net_sum != 0.0 else (result.get('institutional_net') if result.get('institutional_net') is not None else 0.0)
+                    if foreign_data_found:
+                        result['foreign_net'] = round(foreign_net_sum, 2)
+                    elif result.get('foreign_net') is None:
+                        # 네이버에서 수집 실패, KRX API도 없음 → None 유지
+                        result['foreign_net'] = None
+                    # else: KRX API 데이터 유지
+
+                    if institutional_data_found:
+                        result['institutional_net'] = round(institutional_net_sum, 2)
+                    elif result.get('institutional_net') is None:
+                        # 네이버에서 수집 실패, KRX API도 없음 → None 유지
+                        result['institutional_net'] = None
+                    # else: KRX API 데이터 유지
                     # 1일치
                     if foreign_net_1d is not None:
                         result['foreign_net_1d'] = round(foreign_net_1d, 2)

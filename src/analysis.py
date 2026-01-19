@@ -677,8 +677,14 @@ def calculate_returns(ticker: str) -> Dict:
             try:
                 # 같은 데이터 소스에서 과거 가격 추출
                 if len(data) <= days_ago:
-                    # 데이터가 충분하지 않으면 가장 오래된 데이터 사용
-                    logger.warning(f"{ticker}: {days_ago}거래일 전 데이터가 없어 가장 오래된 데이터 사용 ({len(data)}거래일)")
+                    # 데이터가 요청 기간의 70% 미만이면 N/A 반환 (부정확한 수익률 방지)
+                    data_coverage = (len(data) / days_ago) * 100 if days_ago > 0 else 0
+                    if data_coverage < 70:
+                        logger.warning(f"{ticker}: {period_name} 데이터 부족 ({len(data)}/{days_ago}거래일, {data_coverage:.0f}%) - N/A 반환")
+                        result['returns'][period_name] = "N/A"
+                        continue
+                    # 70% 이상이면 가장 오래된 데이터 사용 (경고와 함께)
+                    logger.warning(f"{ticker}: {days_ago}거래일 전 데이터가 없어 가장 오래된 데이터 사용 ({len(data)}거래일, {data_coverage:.0f}%)")
                     past_price = float(data['Close'].iloc[0])
                 else:
                     # 거래일 기준으로 정확한 인덱스 계산
