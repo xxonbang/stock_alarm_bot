@@ -74,34 +74,51 @@ class AIResearcher:
             return True
         return False
     
-    def _call_ai(self, prompt: str, max_retries: int = 5) -> Tuple[str, Dict]:
+    def _call_ai(
+        self,
+        prompt: str,
+        max_retries: int = 5,
+        temperature: float = 0.4,
+        max_output_tokens: int = 4000
+    ) -> Tuple[str, Dict]:
         """
         AI API 호출 (Exponential Backoff 적용, Rate Limit vs Quota 초과 구분)
-        Google Search 도구 비활성화 (tools 파라미터 미사용)
-        
+
         Args:
             prompt: 프롬프트
             max_retries: 최대 재시도 횟수 (기본값: 5)
-        
+            temperature: 응답 다양성 (0.0~1.0, 낮을수록 일관성 높음, 기본값: 0.4)
+            max_output_tokens: 최대 출력 토큰 수 (기본값: 4000)
+
         Returns:
             (AI 응답 텍스트, 토큰 사용량 정보 딕셔너리)
         """
+        from google.genai import types
+
         # 프롬프트 길이 로깅 (할당량 관리용)
         prompt_length = len(prompt)
         estimated_tokens = prompt_length // 4  # 대략적인 토큰 수 추정 (1 토큰 ≈ 4자)
         logger.info(f"API 호출 준비: 프롬프트 {prompt_length}자 (예상 토큰: ~{estimated_tokens}개)")
-        
+        logger.info(f"모델 설정: temperature={temperature}, max_output_tokens={max_output_tokens}")
+
+        # 생성 설정 (google-genai v2는 camelCase 사용)
+        generation_config = types.GenerateContentConfig(
+            temperature=temperature,
+            maxOutputTokens=max_output_tokens,
+            topP=0.9,
+        )
+
         for attempt in range(max_retries):
             try:
                 # API 호출 전 짧은 지연 (Rate Limit 방지)
                 if attempt > 0:
                     time.sleep(2)
-                
-                # Google GenAI v2 API 호출 (웹 검색 도구 명시적으로 비활성화)
+
+                # Google GenAI v2 API 호출
                 response = self.client.models.generate_content(
                     model=self.model_name,
                     contents=prompt,
-                    # tools 파라미터를 명시적으로 전달하지 않음 (웹 검색 비활성화)
+                    config=generation_config,
                 )
                 
                 # 응답 텍스트 추출 (google-genai v2는 response.text 속성 제공)
@@ -159,7 +176,14 @@ class AIResearcher:
                     'Timeout' in error_str or
                     'timeout' in error_str.lower()
                 )
-                
+
+                # 503 서버 과부하 에러 감지
+                is_server_overloaded = (
+                    '503' in error_str or
+                    'overloaded' in error_str.lower() or
+                    'UNAVAILABLE' in error_str
+                )
+
                 # 429 에러 타입 구분
                 is_quota_exceeded = (
                     'quota' in error_str.lower() or 
@@ -202,13 +226,19 @@ class AIResearcher:
                     # 텔레그램 메시지에는 간단한 메시지만 포함
                     return "API 할당량 초과(429 Error)", {}
                 
-                elif (is_dns_error or is_timeout) and attempt < max_retries - 1:
-                    # DNS 해석 실패 또는 타임아웃: Exponential Backoff 적용 (더 짧은 간격)
+                elif (is_dns_error or is_timeout or is_server_overloaded) and attempt < max_retries - 1:
+                    # DNS 해석 실패, 타임아웃, 서버 과부하: Exponential Backoff 적용
                     # 5초 -> 10초 -> 20초 -> 30초 -> 60초
                     wait_times = [5, 10, 20, 30, 60]
                     wait_time = wait_times[min(attempt, len(wait_times) - 1)]
-                    
-                    error_type = "DNS 해석 실패" if is_dns_error else "타임아웃"
+
+                    if is_dns_error:
+                        error_type = "DNS 해석 실패"
+                    elif is_timeout:
+                        error_type = "타임아웃"
+                    else:
+                        error_type = "서버 과부하 (503)"
+
                     print(f"⚠️ {error_type} 에러 발생 (시도 {attempt + 1}/{max_retries})")
                     print(f"⏳ {wait_time}초 대기 후 재시도합니다...")
                     logger.warning(f"⚠️ {error_type} 에러 발생 (시도 {attempt + 1}/{max_retries}): {error_str[:200]}")
@@ -249,23 +279,24 @@ class AIResearcher:
     def generate_briefing(self, collected_data: str) -> Tuple[str, str, Dict]:
         """
         Python이 수집한 데이터를 바탕으로 두 가지 포맷의 리포트 생성 (Compact + Detailed)
-        
+        각 리포트는 별도의 API 호출로 생성하여 품질과 안정성 향상
+
         Args:
             collected_data: Python이 수집한 주가 데이터와 뉴스 헤드라인 텍스트
-        
+
         Returns:
             (Compact 리포트, Detailed 리포트, 토큰 사용량 정보 딕셔너리)
         """
-        logger.info("=== AI 요약 코멘트 생성 시작 (Compact + Detailed 통합) ===")
-        
+        logger.info("=== AI 요약 코멘트 생성 시작 (분리 호출 방식) ===")
+
         # 현재 날짜/시간 정보 생성 (KST 기준)
         from datetime import datetime
         from zoneinfo import ZoneInfo
         kst = ZoneInfo('Asia/Seoul')
         now = datetime.now(kst)
         current_date_str = now.strftime("%Y년 %m월 %d일")
-        current_datetime_str = now.strftime("%Y년 %m월 %d일 %H시 %M분")
-        current_weekday = now.strftime("%A")  # Monday, Tuesday, etc.
+        current_datetime_str = now.strftime("%H시 %M분")
+        current_weekday = now.strftime("%A")
         weekday_kr = {
             'Monday': '월요일',
             'Tuesday': '화요일',
@@ -276,23 +307,19 @@ class AIResearcher:
             'Sunday': '일요일'
         }
         current_weekday_kr = weekday_kr.get(current_weekday, current_weekday)
-        
-        logger.info(f"현재 날짜/시간 (KST): {current_datetime_str} ({current_weekday_kr})")
-        
+
+        logger.info(f"현재 날짜/시간 (KST): {current_date_str} {current_datetime_str} ({current_weekday_kr})")
+
         # collected_data 내용 로깅 (디버깅용)
-        logger.info("=" * 80)
-        logger.info("[LLM에 전달되는 collected_data 내용]")
-        logger.info("=" * 80)
-        logger.info(collected_data)
         logger.info("=" * 80)
         logger.info(f"[collected_data 통계] 총 {len(collected_data)}자, {len(collected_data.splitlines())}줄")
         logger.info("=" * 80)
-        
-        # 두 개의 프롬프트 파일 읽기
+
+        # 프롬프트 파일 읽기
         prompts_dir = Path(__file__).parent.parent / "config" / "prompts"
         compact_prompt_path = prompts_dir / "gemini_briefing_prompt_compact.txt"
         detailed_prompt_path = prompts_dir / "gemini_briefing_prompt.txt"
-        
+
         try:
             with open(compact_prompt_path, 'r', encoding='utf-8') as f:
                 compact_template = f.read()
@@ -304,7 +331,7 @@ class AIResearcher:
         except Exception as e:
             logger.error(f"프롬프트 파일 읽기 실패: {e}")
             raise
-        
+
         # 템플릿 변수 치환
         compact_prompt = compact_template.format(
             current_date_str=current_date_str,
@@ -312,67 +339,76 @@ class AIResearcher:
             current_datetime_str=current_datetime_str,
             collected_data=collected_data
         )
-        
+
         detailed_prompt = detailed_template.format(
             current_date_str=current_date_str,
             current_weekday_kr=current_weekday_kr,
             current_datetime_str=current_datetime_str,
             collected_data=collected_data
         )
-        
-        # 두 프롬프트를 독립적인 요청으로 구성 (구분자 사용)
-        separator = "\n\n" + "=" * 80 + "\n"
-        separator += "[REPORT_SEPARATOR]\n"
-        separator += "위의 Compact 리포트 작성이 완료되면, 반드시 '[REPORT_SEPARATOR]'를 출력하십시오.\n"
-        separator += "그 후 아래 Detailed 리포트 요청을 처리하십시오.\n"
-        separator += "=" * 80 + "\n\n"
-        
-        # 첫 번째 요청: Compact 리포트
-        request_1 = "=== [요청 1: Compact 리포트 생성] ===\n"
-        request_1 += compact_prompt
-        request_1 += "\n\n[⚠️ 중요] 위 Compact 리포트 작성 완료 후, 반드시 '[REPORT_SEPARATOR]'를 출력하십시오.\n"
-        
-        # 두 번째 요청: Detailed 리포트
-        request_2 = "\n\n=== [요청 2: Detailed 리포트 생성] ===\n"
-        request_2 += detailed_prompt
-        
-        combined_prompt = request_1 + separator + request_2
-        
-        logger.info("요약 코멘트 생성 중... (Compact + Detailed 통합)")
+
+        # 토큰 사용량 통합
+        total_usage = {
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0
+        }
+
+        # ========================================
+        # [1/2] Compact 리포트 생성 (별도 API 호출)
+        # ========================================
+        logger.info("=" * 40)
+        logger.info("[1/2] Compact 리포트 생성 중...")
         logger.info(f"Compact 프롬프트 길이: {len(compact_prompt)}자")
+
+        compact_report, compact_usage = self._call_ai(
+            prompt=compact_prompt,
+            temperature=0.4,
+            max_output_tokens=2000  # Compact는 짧은 응답
+        )
+
+        if compact_usage:
+            total_usage['prompt_tokens'] += compact_usage.get('prompt_tokens', 0)
+            total_usage['completion_tokens'] += compact_usage.get('completion_tokens', 0)
+            total_usage['total_tokens'] += compact_usage.get('total_tokens', 0)
+            logger.info(f"Compact 토큰: 입력 {compact_usage.get('prompt_tokens', 0)}, 출력 {compact_usage.get('completion_tokens', 0)}")
+
+        logger.info(f"Compact 리포트 길이: {len(compact_report)}자")
+
+        # ========================================
+        # [2/2] Detailed 리포트 생성 (별도 API 호출)
+        # ========================================
+        logger.info("=" * 40)
+        logger.info("[2/2] Detailed 리포트 생성 중...")
         logger.info(f"Detailed 프롬프트 길이: {len(detailed_prompt)}자")
-        logger.info(f"통합 프롬프트 길이: {len(combined_prompt)}자, 입력 데이터 길이: {len(collected_data)}자")
-        
-        result, usage_info = self._call_ai(combined_prompt)
-        
-        # 응답을 두 리포트로 분리 (구분자 기준)
-        # 구분자가 없으면 전체를 detailed로, compact는 빈 문자열
-        separator_marker = "[REPORT_SEPARATOR]"
-        if separator_marker in result:
-            parts = result.split(separator_marker, 1)
-            compact_report = parts[0].strip()
-            detailed_report = parts[1].strip() if len(parts) > 1 else ""
-        else:
-            # 구분자가 없으면 첫 부분을 compact로, 나머지를 detailed로 시도
-            # 또는 전체를 detailed로 처리
-            logger.warning("응답에 구분자가 없습니다. 전체를 Detailed 리포트로 처리합니다.")
-            compact_report = ""
-            detailed_report = result.strip()
-        
+
+        detailed_report, detailed_usage = self._call_ai(
+            prompt=detailed_prompt,
+            temperature=0.4,
+            max_output_tokens=6000  # Detailed는 긴 응답
+        )
+
+        if detailed_usage:
+            total_usage['prompt_tokens'] += detailed_usage.get('prompt_tokens', 0)
+            total_usage['completion_tokens'] += detailed_usage.get('completion_tokens', 0)
+            total_usage['total_tokens'] += detailed_usage.get('total_tokens', 0)
+            logger.info(f"Detailed 토큰: 입력 {detailed_usage.get('prompt_tokens', 0)}, 출력 {detailed_usage.get('completion_tokens', 0)}")
+
+        logger.info(f"Detailed 리포트 길이: {len(detailed_report)}자")
+
         # 종목명 후처리 로직 적용
         if compact_report:
             compact_report = self._add_stock_names_to_codes(compact_report)
         if detailed_report:
             detailed_report = self._add_stock_names_to_codes(detailed_report)
         
-        if usage_info:
-            logger.info(f"토큰 사용량: 입력 {usage_info.get('prompt_tokens', 0)}개, 출력 {usage_info.get('completion_tokens', 0)}개, 총 {usage_info.get('total_tokens', 0)}개")
-        
-        logger.info(f"Compact 리포트 길이: {len(compact_report)}자")
-        logger.info(f"Detailed 리포트 길이: {len(detailed_report)}자")
+        # 최종 통계 로깅
+        logger.info("=" * 40)
+        logger.info(f"[총 토큰 사용량] 입력: {total_usage['prompt_tokens']}, 출력: {total_usage['completion_tokens']}, 합계: {total_usage['total_tokens']}")
+        logger.info(f"[최종 리포트] Compact: {len(compact_report)}자, Detailed: {len(detailed_report)}자")
         logger.info("=== AI 요약 코멘트 생성 완료 ===")
-        
-        return compact_report, detailed_report, usage_info
+
+        return compact_report, detailed_report, total_usage
     
     def _add_stock_names_to_codes(self, text: str) -> str:
         """
