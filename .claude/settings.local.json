@@ -12,7 +12,9 @@
       "WebFetch(domain:parkeunsang.github.io)",
       "Bash(pip install:*)",
       "Bash(python3:*)",
-      "Bash(pip3 install:*)"
+      "Bash(pip3 install:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)"
     ]
   }
 }
