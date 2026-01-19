@@ -1042,20 +1042,29 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                     supply_demand_1d = result.get('supply_demand_1d', {})
                     foreign_net_1d = supply_demand_1d.get('foreign')
                     institutional_net_1d = supply_demand_1d.get('institutional')
-                    
+
                     if foreign_net_1d is not None:
-                        sign = "+" if foreign_net_1d >= 0 else ""
-                        supply_parts_1m.append(f"<code>외:{sign}{foreign_net_1d:.0f}만</code>")
-                    elif foreign_net_1d == 0.0:
-                        # 0일 때도 표시 (ETF 등에서 외/기 거래가 없을 수 있음)
-                        supply_parts_1m.append(f"<code>외:+0만</code>")
-                    
+                        # -0 방지: 반올림 후 0이면 부호 없이 표시
+                        rounded_val = round(foreign_net_1d)
+                        if rounded_val == 0:
+                            supply_parts_1m.append(f"<code>외:0만</code>")
+                        else:
+                            sign = "+" if foreign_net_1d >= 0 else ""
+                            supply_parts_1m.append(f"<code>외:{sign}{foreign_net_1d:.0f}만</code>")
+
                     if institutional_net_1d is not None:
-                        sign = "+" if institutional_net_1d >= 0 else ""
-                        supply_parts_1m.append(f"<code>기:{sign}{institutional_net_1d:.0f}만</code>")
-                    elif institutional_net_1d == 0.0:
-                        # 0일 때도 표시 (ETF 등에서 외/기 거래가 없을 수 있음)
-                        supply_parts_1m.append(f"<code>기:+0만</code>")
+                        # -0 방지: 반올림 후 0이면 부호 없이 표시
+                        rounded_val = round(institutional_net_1d)
+                        if rounded_val == 0:
+                            supply_parts_1m.append(f"<code>기:0만</code>")
+                        else:
+                            sign = "+" if institutional_net_1d >= 0 else ""
+                            supply_parts_1m.append(f"<code>기:{sign}{institutional_net_1d:.0f}만</code>")
+
+                    # 쌍끌이 판단: 외국인과 기관 모두 순매수(양수)일 때
+                    if foreign_net_1d is not None and institutional_net_1d is not None:
+                        if foreign_net_1d > 0 and institutional_net_1d > 0:
+                            supply_parts_1m.append("<code>🔥쌍끌이</code>")
                     
                     # 3개월 평균 데이터 포맷팅
                     volume_parts_3m = []
@@ -1069,20 +1078,29 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                     supply_demand = result.get('supply_demand', {})
                     foreign_net = supply_demand.get('foreign')
                     institutional_net = supply_demand.get('institutional')
-                    
+
                     if foreign_net is not None:
-                        sign = "+" if foreign_net >= 0 else ""
-                        supply_parts_3m.append(f"<code>외:{sign}{foreign_net:.0f}만</code>")
-                    elif foreign_net == 0.0:
-                        # 0일 때도 표시 (ETF 등에서 외/기 거래가 없을 수 있음)
-                        supply_parts_3m.append(f"<code>외:+0만</code>")
-                    
+                        # -0 방지: 반올림 후 0이면 부호 없이 표시
+                        rounded_val = round(foreign_net)
+                        if rounded_val == 0:
+                            supply_parts_3m.append(f"<code>외:0만</code>")
+                        else:
+                            sign = "+" if foreign_net >= 0 else ""
+                            supply_parts_3m.append(f"<code>외:{sign}{foreign_net:.0f}만</code>")
+
                     if institutional_net is not None:
-                        sign = "+" if institutional_net >= 0 else ""
-                        supply_parts_3m.append(f"<code>기:{sign}{institutional_net:.0f}만</code>")
-                    elif institutional_net == 0.0:
-                        # 0일 때도 표시 (ETF 등에서 외/기 거래가 없을 수 있음)
-                        supply_parts_3m.append(f"<code>기:+0만</code>")
+                        # -0 방지: 반올림 후 0이면 부호 없이 표시
+                        rounded_val = round(institutional_net)
+                        if rounded_val == 0:
+                            supply_parts_3m.append(f"<code>기:0만</code>")
+                        else:
+                            sign = "+" if institutional_net >= 0 else ""
+                            supply_parts_3m.append(f"<code>기:{sign}{institutional_net:.0f}만</code>")
+
+                    # 쌍끌이 판단: 외국인과 기관 모두 순매수(양수)일 때
+                    if foreign_net is not None and institutional_net is not None:
+                        if foreign_net > 0 and institutional_net > 0:
+                            supply_parts_3m.append("<code>🔥쌍끌이</code>")
                     
                     # ETF 괴리율 (1개월 줄에만 표시)
                     disparity_rate = result.get('disparity_rate')
@@ -1098,19 +1116,25 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                         if supply_parts_1m:
                             foreign_part_1m = None
                             inst_part_1m = None
+                            dual_buying_1m = None
                             for part in supply_parts_1m:
                                 if '외:' in part:
                                     foreign_part_1m = part
                                 elif '기:' in part:
                                     inst_part_1m = part
-                            
+                                elif '쌍끌이' in part:
+                                    dual_buying_1m = part
+
                             if foreign_part_1m or inst_part_1m:
                                 supply_combined_1m = " | ".join([p for p in [foreign_part_1m, inst_part_1m] if p])
                                 volume_supply_str_1m += f" | {supply_combined_1m}"
-                        
+
+                            if dual_buying_1m:
+                                volume_supply_str_1m += f" {dual_buying_1m}"
+
                         if nav_part:
                             volume_supply_str_1m += f" | {nav_part}"
-                    
+
                     # 3개월 평균 포맷팅
                     volume_supply_str_3m = ""
                     if volume_parts_3m:
@@ -1118,15 +1142,21 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                         if supply_parts_3m:
                             foreign_part_3m = None
                             inst_part_3m = None
+                            dual_buying_3m = None
                             for part in supply_parts_3m:
                                 if '외:' in part:
                                     foreign_part_3m = part
                                 elif '기:' in part:
                                     inst_part_3m = part
-                            
+                                elif '쌍끌이' in part:
+                                    dual_buying_3m = part
+
                             if foreign_part_3m or inst_part_3m:
                                 supply_combined_3m = " | ".join([p for p in [foreign_part_3m, inst_part_3m] if p])
                                 volume_supply_str_3m += f" | {supply_combined_3m}"
+
+                            if dual_buying_3m:
+                                volume_supply_str_3m += f" {dual_buying_3m}"
                 else:
                     # 해외 종목: 1개월 평균, 3개월 평균 거래량과 기관 보유 비중 표시
                     volume_parts_1m = []
