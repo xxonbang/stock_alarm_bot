@@ -13,7 +13,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import logging
-import pytz
+from datetime import timezone
 import pandas as pd
 import numpy as np
 import time
@@ -173,7 +173,7 @@ def get_historical_price(ticker: str, days_ago: int, hist_data: Optional[pd.Data
                 period_days = max(days_ago * 2, 800)  # 1년 이상은 충분히
             
             # start/end 날짜를 명시적으로 지정하여 데이터 가져오기
-            end_date = datetime.now(pytz.UTC)
+            end_date = datetime.now(timezone.utc)
             start_date = end_date - timedelta(days=period_days)
             
             # 배당/분할 반영을 위해 auto_adjust=True 사용

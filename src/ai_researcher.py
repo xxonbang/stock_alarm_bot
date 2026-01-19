@@ -260,8 +260,8 @@ class AIResearcher:
         
         # 현재 날짜/시간 정보 생성 (KST 기준)
         from datetime import datetime
-        import pytz
-        kst = pytz.timezone('Asia/Seoul')
+        from zoneinfo import ZoneInfo
+        kst = ZoneInfo('Asia/Seoul')
         now = datetime.now(kst)
         current_date_str = now.strftime("%Y년 %m월 %d일")
         current_datetime_str = now.strftime("%Y년 %m월 %d일 %H시 %M분")

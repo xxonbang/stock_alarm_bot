@@ -8,7 +8,7 @@ import os
 import warnings
 from pathlib import Path
 from datetime import datetime
-import pytz
+from zoneinfo import ZoneInfo
 
 # 불필요한 경고 메시지 필터링 (google-generativeai FutureWarning 등)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -181,7 +181,7 @@ def main():
         notifier = create_notifier(settings.telegram_token, settings.chat_id)
         
         # 현재 날짜/시간 (KST)
-        kst = pytz.timezone('Asia/Seoul')
+        kst = ZoneInfo('Asia/Seoul')
         now = datetime.now(kst)
         date_time_str = now.strftime("%Y년 %m월 %d일 %H시 %M분")
         

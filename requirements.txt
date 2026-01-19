@@ -17,9 +17,6 @@ beautifulsoup4>=4.11.1
 PyYAML>=6.0.1
 python-dotenv>=1.0.0
 
-# 시간대 처리
-pytz>=2023.3
-
 # FRED API (연준 데이터)
 fredapi>=0.5.1
 
