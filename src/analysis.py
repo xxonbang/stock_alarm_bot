@@ -1036,7 +1036,7 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                     
                     total_volume_1m = result.get('total_volume_1m')
                     if total_volume_1m is not None and total_volume_1m > 0:
-                        volume_parts_1m.append(f"<code>거래(1M):{total_volume_1m:.0f}만</code>")
+                        volume_parts_1m.append(f"<code>평균(1M):{total_volume_1m:.0f}만</code>")
                     
                     # 1개월 평균 수급 데이터는 최근 1거래일 데이터 사용 (1개월 평균 수급은 계산 복잡하므로)
                     supply_demand_1d = result.get('supply_demand_1d', {})
@@ -1063,7 +1063,7 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                     
                     total_volume_3m = result.get('total_volume_3m')
                     if total_volume_3m is not None and total_volume_3m > 0:
-                        volume_parts_3m.append(f"<code>거래(3M):{total_volume_3m:.0f}만</code>")
+                        volume_parts_3m.append(f"<code>평균(3M):{total_volume_3m:.0f}만</code>")
                     
                     # 3개월 평균 수급 데이터는 최근 3거래일 합계 데이터 사용
                     supply_demand = result.get('supply_demand', {})
@@ -1136,12 +1136,12 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                     # 1개월 평균 거래량
                     total_volume_1m = result.get('total_volume_1m')
                     if total_volume_1m is not None and total_volume_1m > 0:
-                        volume_parts_1m.append(f"<code>거래(1M):{total_volume_1m:.0f}만</code>")
+                        volume_parts_1m.append(f"<code>평균(1M):{total_volume_1m:.0f}만</code>")
                     
                     # 3개월 평균 거래량
                     total_volume_3m = result.get('total_volume_3m')
                     if total_volume_3m is not None and total_volume_3m > 0:
-                        volume_parts_3m.append(f"<code>거래(3M):{total_volume_3m:.0f}만</code>")
+                        volume_parts_3m.append(f"<code>평균(3M):{total_volume_3m:.0f}만</code>")
                     
                     # 기관 보유 비중 (1개월 줄에만 표시)
                     if institutional_held is not None:
