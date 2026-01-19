@@ -4,6 +4,10 @@
 # 1.0 이상 버전 사용, 2.0 Breaking Change 방지
 yfinance>=1.0.0,<2.0.0
 
+# 한국 주식 수급 데이터 (KRX 공식 데이터 기반)
+# 외국인/기관 순매매량 수집에 사용
+pykrx>=1.0.0
+
 # Google AI (Gemini) - 최신 v2 SDK
 google-genai>=1.0.0
 

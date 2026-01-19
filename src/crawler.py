@@ -1897,6 +1897,81 @@ def translate_headlines(headlines_text: str) -> str:
         return headlines_text
 
 
+def get_supply_demand_pykrx(ticker_code: str) -> Dict[str, Optional[float]]:
+    """
+    pykrx를 사용한 외국인/기관 순매매량 수집 (KRX 공식 데이터 기반)
+
+    pykrx는 KRX 정보데이터시스템을 스크래핑하여 정확한 투자자별 순매수 데이터를 제공합니다.
+    네이버 크롤링보다 안정적이며, KRX 공식 데이터와 동일한 정확도를 보장합니다.
+
+    Args:
+        ticker_code: 국내 티커 코드 (예: '005930.KS', '379810.KS')
+
+    Returns:
+        {
+            'foreign_net': 외국인 순매매량 (만 주, 최근 3거래일 합계),
+            'institutional_net': 기관 순매매량 (만 주, 최근 3거래일 합계),
+            'foreign_net_1d': 외국인 순매매량 (만 주, 최근 1거래일),
+            'institutional_net_1d': 기관 순매매량 (만 주, 최근 1거래일),
+        }
+    """
+    result = {
+        'foreign_net': None,
+        'institutional_net': None,
+        'foreign_net_1d': None,
+        'institutional_net_1d': None,
+    }
+
+    try:
+        from pykrx import stock
+        from datetime import datetime, timedelta
+
+        # .KS, .KQ 제거하여 순수 코드만 추출
+        code = ticker_code.replace('.KS', '').replace('.KQ', '')
+
+        # 최근 7일 범위 조회 (주말/공휴일 고려)
+        end_date = datetime.now().strftime('%Y%m%d')
+        start_date = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
+
+        # 거래량 기준 투자자별 순매수 데이터 조회
+        # 컬럼: 기관합계, 기타법인, 개인, 외국인합계, 전체
+        df = stock.get_market_trading_volume_by_date(start_date, end_date, code)
+
+        if df.empty:
+            logger.debug(f"{ticker_code}: pykrx 데이터 없음")
+            return result
+
+        # 최근 3거래일 합계
+        recent_3d = df.tail(3)
+        if len(recent_3d) > 0:
+            # 외국인합계, 기관합계 컬럼 사용
+            if '외국인합계' in recent_3d.columns:
+                foreign_sum = recent_3d['외국인합계'].sum()
+                result['foreign_net'] = round(foreign_sum / 10000, 2)  # 만주 단위
+
+            if '기관합계' in recent_3d.columns:
+                institutional_sum = recent_3d['기관합계'].sum()
+                result['institutional_net'] = round(institutional_sum / 10000, 2)  # 만주 단위
+
+        # 최근 1거래일
+        if len(df) > 0:
+            latest = df.iloc[-1]
+            if '외국인합계' in df.columns:
+                result['foreign_net_1d'] = round(latest['외국인합계'] / 10000, 2)
+            if '기관합계' in df.columns:
+                result['institutional_net_1d'] = round(latest['기관합계'] / 10000, 2)
+
+        logger.debug(f"{ticker_code} pykrx 수급 데이터: 외인(3일) {result['foreign_net']}만주, 기관(3일) {result['institutional_net']}만주")
+        return result
+
+    except ImportError:
+        logger.warning("pykrx 라이브러리가 설치되지 않았습니다. pip install pykrx")
+        return result
+    except Exception as e:
+        logger.debug(f"{ticker_code} pykrx 수급 데이터 수집 실패: {e}")
+        return result
+
+
 def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optional[float]]:
     """
     KRX OpenAPI를 사용한 국내 주식 데이터 수집 (수급 데이터)
@@ -2286,14 +2361,15 @@ def get_krx_api_status() -> Dict[str, any]:
 def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
     """
     국내 주식 특화 데이터 수집 (수급, ETF 괴리율)
-    
-    Fallback 메커니즘:
-    1차: KRX OpenAPI 시도 (인증키가 있는 경우)
-    2차: 네이버 금융 크롤링 (기존 방식, Fallback)
-    
+
+    Fallback 메커니즘 (우선순위):
+    1차: pykrx (KRX 공식 데이터 기반, 가장 안정적)
+    2차: KRX OpenAPI 시도 (인증키가 있는 경우)
+    3차: 네이버 금융 크롤링 (최종 Fallback)
+
     Args:
         ticker_code: 국내 티커 코드 (예: '005930' for '005930.KS')
-    
+
     Returns:
         {
             'foreign_net': 외국인 순매매량 (만 주, 최근 3거래일 합계),
@@ -2314,11 +2390,24 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
         'total_volume': None,
         'total_volume_1d': None
     }
-    
+
     # .KS, .KQ 제거하여 순수 코드만 추출
     code = ticker_code.replace('.KS', '').replace('.KQ', '')
-    
-    # 1차: KRX API 시도 (인증키가 있는 경우만)
+
+    # 1차: pykrx 시도 (KRX 공식 데이터 기반, 가장 안정적)
+    pykrx_data = get_supply_demand_pykrx(ticker_code)
+    pykrx_has_data = (
+        pykrx_data.get('foreign_net') is not None or
+        pykrx_data.get('institutional_net') is not None
+    )
+    if pykrx_has_data:
+        result['foreign_net'] = pykrx_data.get('foreign_net')
+        result['institutional_net'] = pykrx_data.get('institutional_net')
+        result['foreign_net_1d'] = pykrx_data.get('foreign_net_1d')
+        result['institutional_net_1d'] = pykrx_data.get('institutional_net_1d')
+        logger.debug(f"{ticker_code}: pykrx로 수급 데이터 수집 성공")
+
+    # 2차: KRX API 시도 (인증키가 있는 경우, pykrx 실패 시 폴백)
     try:
         from config.settings import settings
         if settings.krx_api_key:
@@ -2356,26 +2445,27 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
                 logger.debug(f"{ticker_code}: ETF API 호출 실패 (일반 주식일 가능성): {e}")
             
             # ETF든 일반 주식이든 외/기 수급 데이터는 수집 (ETF도 외/기 거래가 있을 수 있음)
-            # 단, ETF는 괴리율 데이터를 이미 수집했으므로 일반 주식 API는 수급 데이터만 수집
-            try:
-                krx_data = get_kr_stock_data_krx_api(ticker_code, settings.krx_api_key)
-                # KRX API에서 데이터를 성공적으로 가져온 경우 (1일치와 3일치 모두)
-                if krx_data.get('foreign_net') is not None or krx_data.get('institutional_net') is not None:
-                    result['foreign_net'] = krx_data.get('foreign_net')
-                    result['institutional_net'] = krx_data.get('institutional_net')
-                    logger.debug(f"{ticker_code}: KRX API로 수급 데이터(3일) 수집 성공")
-                if krx_data.get('foreign_net_1d') is not None or krx_data.get('institutional_net_1d') is not None:
-                    result['foreign_net_1d'] = krx_data.get('foreign_net_1d')
-                    result['institutional_net_1d'] = krx_data.get('institutional_net_1d')
-                    logger.debug(f"{ticker_code}: KRX API로 수급 데이터(1일) 수집 성공")
-                # 거래량도 함께 저장 (ETF가 아닌 경우만, ETF는 이미 ETF API에서 수집)
-                if not is_etf:
-                    if krx_data.get('total_volume') is not None:
-                        result['total_volume'] = krx_data.get('total_volume')
-                    if krx_data.get('total_volume_1d') is not None:
-                        result['total_volume_1d'] = krx_data.get('total_volume_1d')
-            except Exception as e:
-                logger.debug(f"{ticker_code}: KRX API 수급 데이터 실패, 네이버 크롤링으로 대체: {e}")
+            # 단, pykrx에서 이미 수급 데이터를 가져왔으면 KRX API 수급 수집 건너뛰기
+            if not pykrx_has_data:
+                try:
+                    krx_data = get_kr_stock_data_krx_api(ticker_code, settings.krx_api_key)
+                    # KRX API에서 데이터를 성공적으로 가져온 경우 (1일치와 3일치 모두)
+                    if krx_data.get('foreign_net') is not None or krx_data.get('institutional_net') is not None:
+                        result['foreign_net'] = krx_data.get('foreign_net')
+                        result['institutional_net'] = krx_data.get('institutional_net')
+                        logger.debug(f"{ticker_code}: KRX API로 수급 데이터(3일) 수집 성공")
+                    if krx_data.get('foreign_net_1d') is not None or krx_data.get('institutional_net_1d') is not None:
+                        result['foreign_net_1d'] = krx_data.get('foreign_net_1d')
+                        result['institutional_net_1d'] = krx_data.get('institutional_net_1d')
+                        logger.debug(f"{ticker_code}: KRX API로 수급 데이터(1일) 수집 성공")
+                    # 거래량도 함께 저장 (ETF가 아닌 경우만, ETF는 이미 ETF API에서 수집)
+                    if not is_etf:
+                        if krx_data.get('total_volume') is not None:
+                            result['total_volume'] = krx_data.get('total_volume')
+                        if krx_data.get('total_volume_1d') is not None:
+                            result['total_volume_1d'] = krx_data.get('total_volume_1d')
+                except Exception as e:
+                    logger.debug(f"{ticker_code}: KRX API 수급 데이터 실패, 네이버 크롤링으로 대체: {e}")
     except (ImportError, AttributeError) as e:
         logger.debug(f"KRX API 설정 확인 실패 (정상, 기존 방식 사용): {e}")
     

@@ -9,7 +9,10 @@
       "Bash(python3 -m py_compile:*)",
       "WebSearch",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:parkeunsang.github.io)"
+      "WebFetch(domain:parkeunsang.github.io)",
+      "Bash(pip install:*)",
+      "Bash(python3:*)",
+      "Bash(pip3 install:*)"
     ]
   }
 }
