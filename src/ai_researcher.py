@@ -79,7 +79,8 @@ class AIResearcher:
         prompt: str,
         max_retries: int = 5,
         temperature: float = 0.4,
-        max_output_tokens: int = 4000
+        max_output_tokens: int = 4000,
+        system_instruction: str = None
     ) -> Tuple[str, Dict]:
         """
         AI API 호출 (Exponential Backoff 적용, Rate Limit vs Quota 초과 구분)
@@ -89,6 +90,7 @@ class AIResearcher:
             max_retries: 최대 재시도 횟수 (기본값: 5)
             temperature: 응답 다양성 (0.0~1.0, 낮을수록 일관성 높음, 기본값: 0.4)
             max_output_tokens: 최대 출력 토큰 수 (기본값: 4000)
+            system_instruction: 시스템 인스트럭션 (선택사항)
 
         Returns:
             (AI 응답 텍스트, 토큰 사용량 정보 딕셔너리)
@@ -102,11 +104,16 @@ class AIResearcher:
         logger.info(f"모델 설정: temperature={temperature}, max_output_tokens={max_output_tokens}")
 
         # 생성 설정 (google-genai v2는 camelCase 사용)
-        generation_config = types.GenerateContentConfig(
-            temperature=temperature,
-            maxOutputTokens=max_output_tokens,
-            topP=0.9,
-        )
+        config_params = {
+            'temperature': temperature,
+            'maxOutputTokens': max_output_tokens,
+            'topP': 0.9,
+        }
+        if system_instruction:
+            config_params['systemInstruction'] = system_instruction
+            logger.info("시스템 인스트럭션 적용됨")
+
+        generation_config = types.GenerateContentConfig(**config_params)
 
         for attempt in range(max_retries):
             try:
@@ -399,13 +406,27 @@ class AIResearcher:
         logger.info(f"입력 데이터: {len(collected_data)}자, Compact 지시: {len(compact_instructions)}자, Detailed 지시: {len(detailed_instructions)}자")
         logger.info(f"통합 프롬프트 총 길이: {len(combined_prompt)}자 (데이터 1회 포함)")
 
+        # 시스템 인스트럭션: XML 형식 강제
+        system_instruction = """당신은 금융 분석 전문가입니다.
+반드시 아래 XML 형식으로 출력하십시오:
+
+<COMPACT_REPORT>
+Compact 리포트 내용
+</COMPACT_REPORT>
+
+<DETAILED_REPORT>
+Detailed 리포트 내용
+</DETAILED_REPORT>
+
+XML 태그 없이 출력하면 안 됩니다. 반드시 <COMPACT_REPORT>와 <DETAILED_REPORT> 태그로 감싸십시오."""
+
         # 단일 API 호출
         # Gemini 2.5는 thinking 토큰이 maxOutputTokens에 포함됨
-        # thinking ~8000 + 실제 출력 ~8000 = 16000 필요
         result, usage_info = self._call_ai(
             prompt=combined_prompt,
             temperature=0.4,
-            max_output_tokens=16000
+            max_output_tokens=16000,
+            system_instruction=system_instruction
         )
 
         # XML 태그로 리포트 분리
