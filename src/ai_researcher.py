@@ -123,7 +123,15 @@ class AIResearcher:
                 
                 # 응답 텍스트 추출 (google-genai v2는 response.text 속성 제공)
                 response_text = response.text if hasattr(response, 'text') else ""
-                
+
+                # 응답 완료 이유 확인 (비정상 종료 시 경고)
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    finish_reason = getattr(candidate, 'finish_reason', 'UNKNOWN')
+                    # STOP(1) 또는 "STOP" 문자열이 아니면 경고
+                    if str(finish_reason) not in ('STOP', 'FinishReason.STOP', '1'):
+                        logger.warning(f"⚠️ 응답 비정상 종료: {finish_reason} - maxOutputTokens 증가 필요")
+
                 # 토큰 사용량 정보 추출
                 usage_info = {}
                 if hasattr(response, 'usage_metadata'):
@@ -332,58 +340,72 @@ class AIResearcher:
             logger.error(f"프롬프트 파일 읽기 실패: {e}")
             raise
 
-        # 템플릿 변수 치환
-        compact_prompt = compact_template.format(
-            current_date_str=current_date_str,
-            current_weekday_kr=current_weekday_kr,
-            current_datetime_str=current_datetime_str,
-            collected_data=collected_data
-        )
-
-        detailed_prompt = detailed_template.format(
-            current_date_str=current_date_str,
-            current_weekday_kr=current_weekday_kr,
-            current_datetime_str=current_datetime_str,
-            collected_data=collected_data
-        )
-
         # ========================================
         # 통합 프롬프트 구성 (1회 API 호출, XML 태그로 분리)
+        # collected_data를 1회만 포함하여 토큰 효율성 극대화
         # ========================================
-        combined_prompt = f"""당신은 두 가지 형식의 리포트를 순서대로 작성해야 합니다.
-반드시 아래 XML 태그 형식을 정확히 지켜서 출력하십시오.
+
+        # 프롬프트 템플릿에서 데이터 참조 표시로 치환 (실제 데이터는 상단에 1회만 포함)
+        compact_instructions = compact_template.format(
+            current_date_str=current_date_str,
+            current_weekday_kr=current_weekday_kr,
+            current_datetime_str=current_datetime_str,
+            collected_data="[위 INPUT DATA 섹션 참조]"
+        )
+
+        detailed_instructions = detailed_template.format(
+            current_date_str=current_date_str,
+            current_weekday_kr=current_weekday_kr,
+            current_datetime_str=current_datetime_str,
+            collected_data="[위 INPUT DATA 섹션 참조]"
+        )
+
+        combined_prompt = f"""# 작업 지시
+
+두 개의 독립적인 리포트를 작성하십시오. 각 리포트는 반드시 지정된 XML 태그로 감싸야 합니다.
+
+━━━━━━━━━━━━━━━━━━━━━━
+# INPUT DATA (두 리포트 공통 사용)
+━━━━━━━━━━━━━━━━━━━━━━
+{collected_data}
+
+━━━━━━━━━━━━━━━━━━━━━━
+# 요청 1: Compact 리포트
+# 반드시 <COMPACT_REPORT> 태그 안에 작성
+━━━━━━━━━━━━━━━━━━━━━━
+{compact_instructions}
+
+━━━━━━━━━━━━━━━━━━━━━━
+# 요청 2: Detailed 리포트
+# 반드시 <DETAILED_REPORT> 태그 안에 작성
+━━━━━━━━━━━━━━━━━━━━━━
+{detailed_instructions}
+
+━━━━━━━━━━━━━━━━━━━━━━
+# 출력 형식 (필수)
+━━━━━━━━━━━━━━━━━━━━━━
 
 <COMPACT_REPORT>
-[여기에 Compact 리포트 내용]
+(여기에 Compact 리포트 전체 내용)
 </COMPACT_REPORT>
 
 <DETAILED_REPORT>
-[여기에 Detailed 리포트 내용]
+(여기에 Detailed 리포트 전체 내용)
 </DETAILED_REPORT>
-
-━━━━━━━━━━━━━━━━━━━━━━
-[요청 1: Compact 리포트]
-━━━━━━━━━━━━━━━━━━━━━━
-{compact_prompt}
-
-━━━━━━━━━━━━━━━━━━━━━━
-[요청 2: Detailed 리포트]
-━━━━━━━━━━━━━━━━━━━━━━
-{detailed_prompt}
-
-⚠️ 중요: 반드시 <COMPACT_REPORT>와 <DETAILED_REPORT> XML 태그로 두 리포트를 감싸서 출력하십시오.
 """
 
         logger.info("=" * 40)
         logger.info("통합 리포트 생성 중 (Compact + Detailed, 1회 API 호출)...")
-        logger.info(f"Compact 프롬프트: {len(compact_prompt)}자, Detailed 프롬프트: {len(detailed_prompt)}자")
-        logger.info(f"통합 프롬프트 총 길이: {len(combined_prompt)}자")
+        logger.info(f"입력 데이터: {len(collected_data)}자, Compact 지시: {len(compact_instructions)}자, Detailed 지시: {len(detailed_instructions)}자")
+        logger.info(f"통합 프롬프트 총 길이: {len(combined_prompt)}자 (데이터 1회 포함)")
 
         # 단일 API 호출
+        # Gemini 2.5는 thinking 토큰이 maxOutputTokens에 포함됨
+        # thinking ~8000 + 실제 출력 ~8000 = 16000 필요
         result, usage_info = self._call_ai(
             prompt=combined_prompt,
             temperature=0.4,
-            max_output_tokens=8000  # Compact(~2000) + Detailed(~6000)
+            max_output_tokens=16000
         )
 
         # XML 태그로 리포트 분리
@@ -421,6 +443,7 @@ class AIResearcher:
 
         compact_report = ""
         detailed_report = ""
+
 
         # <COMPACT_REPORT> 태그 추출
         compact_match = re.search(
