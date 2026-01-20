@@ -1061,9 +1061,9 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                             sign = "+" if institutional_net_1d >= 0 else ""
                             supply_parts_1m.append(f"<code>기:{sign}{institutional_net_1d:.0f}만</code>")
 
-                    # 쌍끌이 판단: 외국인과 기관 모두 순매수(양수)일 때
+                    # 쌍끌이 판단: 반올림 값이 양수일 때 (표시와 일관성 유지)
                     if foreign_net_1d is not None and institutional_net_1d is not None:
-                        if foreign_net_1d > 0 and institutional_net_1d > 0:
+                        if round(foreign_net_1d) > 0 and round(institutional_net_1d) > 0:
                             supply_parts_1m.append("<code>🔥쌍끌이</code>")
                     
                     # 3개월 평균 데이터 포맷팅
@@ -1097,9 +1097,9 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                             sign = "+" if institutional_net >= 0 else ""
                             supply_parts_3m.append(f"<code>기:{sign}{institutional_net:.0f}만</code>")
 
-                    # 쌍끌이 판단: 외국인과 기관 모두 순매수(양수)일 때
+                    # 쌍끌이 판단: 반올림 값이 양수일 때 (표시와 일관성 유지)
                     if foreign_net is not None and institutional_net is not None:
-                        if foreign_net > 0 and institutional_net > 0:
+                        if round(foreign_net) > 0 and round(institutional_net) > 0:
                             supply_parts_3m.append("<code>🔥쌍끌이</code>")
                     
                     # ETF 괴리율 (1개월 줄에만 표시)
