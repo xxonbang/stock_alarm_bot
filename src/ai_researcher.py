@@ -347,61 +347,49 @@ class AIResearcher:
             collected_data=collected_data
         )
 
-        # 토큰 사용량 통합
-        total_usage = {
-            'prompt_tokens': 0,
-            'completion_tokens': 0,
-            'total_tokens': 0
-        }
+        # ========================================
+        # 통합 프롬프트 구성 (1회 API 호출, XML 태그로 분리)
+        # ========================================
+        combined_prompt = f"""당신은 두 가지 형식의 리포트를 순서대로 작성해야 합니다.
+반드시 아래 XML 태그 형식을 정확히 지켜서 출력하십시오.
 
-        # ========================================
-        # [1/2] Compact 리포트 생성 (별도 API 호출)
-        # ========================================
+<COMPACT_REPORT>
+[여기에 Compact 리포트 내용]
+</COMPACT_REPORT>
+
+<DETAILED_REPORT>
+[여기에 Detailed 리포트 내용]
+</DETAILED_REPORT>
+
+━━━━━━━━━━━━━━━━━━━━━━
+[요청 1: Compact 리포트]
+━━━━━━━━━━━━━━━━━━━━━━
+{compact_prompt}
+
+━━━━━━━━━━━━━━━━━━━━━━
+[요청 2: Detailed 리포트]
+━━━━━━━━━━━━━━━━━━━━━━
+{detailed_prompt}
+
+⚠️ 중요: 반드시 <COMPACT_REPORT>와 <DETAILED_REPORT> XML 태그로 두 리포트를 감싸서 출력하십시오.
+"""
+
         logger.info("=" * 40)
-        logger.info("[1/2] Compact 리포트 생성 중...")
-        logger.info(f"Compact 프롬프트 길이: {len(compact_prompt)}자")
+        logger.info("통합 리포트 생성 중 (Compact + Detailed, 1회 API 호출)...")
+        logger.info(f"Compact 프롬프트: {len(compact_prompt)}자, Detailed 프롬프트: {len(detailed_prompt)}자")
+        logger.info(f"통합 프롬프트 총 길이: {len(combined_prompt)}자")
 
-        compact_report, compact_usage = self._call_ai(
-            prompt=compact_prompt,
+        # 단일 API 호출
+        result, usage_info = self._call_ai(
+            prompt=combined_prompt,
             temperature=0.4,
-            max_output_tokens=2000  # Compact는 짧은 응답
+            max_output_tokens=8000  # Compact(~2000) + Detailed(~6000)
         )
 
-        if compact_usage:
-            total_usage['prompt_tokens'] += compact_usage.get('prompt_tokens', 0)
-            total_usage['completion_tokens'] += compact_usage.get('completion_tokens', 0)
-            total_usage['total_tokens'] += compact_usage.get('total_tokens', 0)
-            logger.info(f"Compact 토큰: 입력 {compact_usage.get('prompt_tokens', 0)}, 출력 {compact_usage.get('completion_tokens', 0)}")
+        # XML 태그로 리포트 분리
+        compact_report, detailed_report = self._parse_xml_reports(result)
 
         logger.info(f"Compact 리포트 길이: {len(compact_report)}자")
-
-        # ========================================
-        # Rate Limit 방지를 위한 대기
-        # Gemini API는 연속 호출 시 429 에러 발생 가능
-        # ========================================
-        api_delay_seconds = 10
-        logger.info(f"⏳ Rate Limit 방지를 위해 {api_delay_seconds}초 대기 중...")
-        time.sleep(api_delay_seconds)
-
-        # ========================================
-        # [2/2] Detailed 리포트 생성 (별도 API 호출)
-        # ========================================
-        logger.info("=" * 40)
-        logger.info("[2/2] Detailed 리포트 생성 중...")
-        logger.info(f"Detailed 프롬프트 길이: {len(detailed_prompt)}자")
-
-        detailed_report, detailed_usage = self._call_ai(
-            prompt=detailed_prompt,
-            temperature=0.4,
-            max_output_tokens=6000  # Detailed는 긴 응답
-        )
-
-        if detailed_usage:
-            total_usage['prompt_tokens'] += detailed_usage.get('prompt_tokens', 0)
-            total_usage['completion_tokens'] += detailed_usage.get('completion_tokens', 0)
-            total_usage['total_tokens'] += detailed_usage.get('total_tokens', 0)
-            logger.info(f"Detailed 토큰: 입력 {detailed_usage.get('prompt_tokens', 0)}, 출력 {detailed_usage.get('completion_tokens', 0)}")
-
         logger.info(f"Detailed 리포트 길이: {len(detailed_report)}자")
 
         # 종목명 후처리 로직 적용
@@ -409,14 +397,58 @@ class AIResearcher:
             compact_report = self._add_stock_names_to_codes(compact_report)
         if detailed_report:
             detailed_report = self._add_stock_names_to_codes(detailed_report)
-        
+
         # 최종 통계 로깅
         logger.info("=" * 40)
-        logger.info(f"[총 토큰 사용량] 입력: {total_usage['prompt_tokens']}, 출력: {total_usage['completion_tokens']}, 합계: {total_usage['total_tokens']}")
+        if usage_info:
+            logger.info(f"[토큰 사용량] 입력: {usage_info.get('prompt_tokens', 0)}, 출력: {usage_info.get('completion_tokens', 0)}, 합계: {usage_info.get('total_tokens', 0)}")
         logger.info(f"[최종 리포트] Compact: {len(compact_report)}자, Detailed: {len(detailed_report)}자")
         logger.info("=== AI 요약 코멘트 생성 완료 ===")
 
-        return compact_report, detailed_report, total_usage
+        return compact_report, detailed_report, usage_info
+
+    def _parse_xml_reports(self, text: str) -> tuple:
+        """
+        XML 태그로 감싸진 응답에서 Compact/Detailed 리포트 추출
+
+        Args:
+            text: AI 응답 전체 텍스트
+
+        Returns:
+            (compact_report, detailed_report) 튜플
+        """
+        import re
+
+        compact_report = ""
+        detailed_report = ""
+
+        # <COMPACT_REPORT> 태그 추출
+        compact_match = re.search(
+            r'<COMPACT_REPORT>(.*?)</COMPACT_REPORT>',
+            text,
+            re.DOTALL
+        )
+        if compact_match:
+            compact_report = compact_match.group(1).strip()
+        else:
+            logger.warning("⚠️ <COMPACT_REPORT> 태그를 찾을 수 없습니다.")
+
+        # <DETAILED_REPORT> 태그 추출
+        detailed_match = re.search(
+            r'<DETAILED_REPORT>(.*?)</DETAILED_REPORT>',
+            text,
+            re.DOTALL
+        )
+        if detailed_match:
+            detailed_report = detailed_match.group(1).strip()
+        else:
+            logger.warning("⚠️ <DETAILED_REPORT> 태그를 찾을 수 없습니다.")
+            # 폴백: 태그가 없으면 전체를 Detailed로 처리
+            if not compact_report and not detailed_report:
+                logger.warning("모든 태그 누락. 전체 응답을 Detailed 리포트로 처리합니다.")
+                detailed_report = text.strip()
+
+        return compact_report, detailed_report
     
     def _add_stock_names_to_codes(self, text: str) -> str:
         """
