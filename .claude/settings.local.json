@@ -14,7 +14,9 @@
       "Bash(python3:*)",
       "Bash(pip3 install:*)",
       "Bash(wc:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(python:*)",
+      "Bash(ls:*)"
     ]
   }
 }

@@ -376,6 +376,14 @@ class AIResearcher:
         logger.info(f"Compact 리포트 길이: {len(compact_report)}자")
 
         # ========================================
+        # Rate Limit 방지를 위한 대기
+        # Gemini API는 연속 호출 시 429 에러 발생 가능
+        # ========================================
+        api_delay_seconds = 10
+        logger.info(f"⏳ Rate Limit 방지를 위해 {api_delay_seconds}초 대기 중...")
+        time.sleep(api_delay_seconds)
+
+        # ========================================
         # [2/2] Detailed 리포트 생성 (별도 API 호출)
         # ========================================
         logger.info("=" * 40)
