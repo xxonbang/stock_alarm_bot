@@ -689,8 +689,20 @@ def calculate_returns(ticker: str) -> Dict:
     # 국내 주식인 경우 수급 데이터, ETF 괴리율, 거래량 수집
     if '.KS' in ticker or '.KQ' in ticker:
         try:
-            from src.crawler import get_kr_stock_data
-            kr_data = get_kr_stock_data(ticker)
+            # Feature Flag: 듀얼 소스 시스템 사용 여부
+            try:
+                from config.settings import settings
+                use_dual_source = settings.use_dual_source
+            except Exception:
+                use_dual_source = False
+
+            if use_dual_source:
+                from src.crawler import get_kr_stock_data_v2
+                kr_data = get_kr_stock_data_v2(ticker)
+                logger.debug(f"{ticker}: 듀얼 소스 시스템 사용")
+            else:
+                from src.crawler import get_kr_stock_data
+                kr_data = get_kr_stock_data(ticker)
             if kr_data:
                 # None 체크 강화 (3일치와 1일치 모두 수집)
                 foreign_net = kr_data.get('foreign_net')

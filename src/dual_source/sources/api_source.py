@@ -1,0 +1,366 @@
+"""
+전통적 API 기반 데이터 소스 (Source B)
+
+REST API, 라이브러리, 크롤링을 통해 구조화된 데이터 직접 수집
+
+한국 주식: pykrx + KRX API + 네이버 크롤링
+해외 주식: yfinance
+
+장점:
+- 빠른 응답 속도 (100-500ms)
+- 추가 비용 없음
+- 구조화된 데이터 직접 획득
+
+단점:
+- API 스펙 변경 시 코드 수정 필요
+- Rate limit 제한
+"""
+import logging
+from datetime import datetime, timedelta, date
+from typing import Optional, Dict
+
+import requests
+from bs4 import BeautifulSoup
+
+from .base import DataSourceBase
+from ..types import SupplyDemandData
+
+logger = logging.getLogger(__name__)
+
+# HTTP 세션 (재사용)
+_session = requests.Session()
+
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+}
+
+
+class TraditionalAPISource(DataSourceBase):
+    """전통적 API 기반 데이터 소스 (Source B)"""
+
+    def __init__(self, krx_api_key: Optional[str] = None):
+        """
+        Args:
+            krx_api_key: KRX OpenAPI 인증키 (선택사항)
+        """
+        super().__init__()
+        self._krx_api_key = krx_api_key
+
+    @property
+    def source_name(self) -> str:
+        return "traditional_api"
+
+    @property
+    def priority(self) -> int:
+        return 2  # Source B: 보조
+
+    def is_supported(self, ticker_code: str) -> bool:
+        """한국 주식과 해외 주식 모두 지원"""
+        return True
+
+    def _is_korean_stock(self, ticker_code: str) -> bool:
+        """한국 주식인지 확인"""
+        return '.KS' in ticker_code or '.KQ' in ticker_code
+
+    def _collect_with_pykrx(self, code: str) -> SupplyDemandData:
+        """pykrx를 사용한 수급 데이터 수집"""
+        result: SupplyDemandData = {}
+
+        try:
+            from pykrx import stock
+
+            end_date = datetime.now().strftime('%Y%m%d')
+            start_date = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
+
+            df = stock.get_market_trading_volume_by_date(start_date, end_date, code)
+
+            if df.empty:
+                return result
+
+            # 최근 3거래일 합계
+            recent_3d = df.tail(3)
+            if len(recent_3d) > 0:
+                if '외국인합계' in recent_3d.columns:
+                    foreign_sum = recent_3d['외국인합계'].sum()
+                    result['foreign_net'] = round(foreign_sum / 10000, 2)
+
+                if '기관합계' in recent_3d.columns:
+                    institutional_sum = recent_3d['기관합계'].sum()
+                    result['institutional_net'] = round(institutional_sum / 10000, 2)
+
+            # 최근 1거래일
+            if len(df) > 0:
+                latest = df.iloc[-1]
+                if '외국인합계' in df.columns:
+                    result['foreign_net_1d'] = round(latest['외국인합계'] / 10000, 2)
+                if '기관합계' in df.columns:
+                    result['institutional_net_1d'] = round(latest['기관합계'] / 10000, 2)
+
+            logger.debug(f"pykrx 수급: 외인={result.get('foreign_net')}만주, 기관={result.get('institutional_net')}만주")
+
+        except ImportError:
+            logger.warning("pykrx 미설치")
+        except Exception as e:
+            logger.debug(f"pykrx 수집 실패: {e}")
+
+        return result
+
+    def _collect_with_krx_api(self, code: str) -> SupplyDemandData:
+        """KRX OpenAPI를 사용한 수급 데이터 수집"""
+        result: SupplyDemandData = {}
+
+        if not self._krx_api_key:
+            return result
+
+        foreign_sum = 0.0
+        institutional_sum = 0.0
+        count = 0
+
+        for i in range(3):
+            date_str = (datetime.now() - timedelta(days=i)).strftime('%Y%m%d')
+            url = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd"
+            headers = {"AUTH_KEY": self._krx_api_key}
+
+            for isu_cd in [code, f"KR{code.zfill(10)}"]:
+                try:
+                    response = _session.get(
+                        url,
+                        params={"basDd": date_str, "isuCd": isu_cd},
+                        headers=headers,
+                        timeout=5
+                    )
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        if 'OutBlock_1' in data and len(data['OutBlock_1']) > 0:
+                            row = data['OutBlock_1'][0]
+                            isu = str(row.get('ISU_CD', '')).strip()
+
+                            if code in isu or isu.endswith(code):
+                                foreign_raw = row.get('FRGN_NTBY_QTY') or row.get('외국인순매수') or 0
+                                inst_raw = row.get('ORG_NTBY_QTY') or row.get('기관순매수') or 0
+
+                                foreign_val = self._parse_numeric(foreign_raw)
+                                inst_val = self._parse_numeric(inst_raw)
+
+                                if count == 0:
+                                    result['foreign_net_1d'] = round(foreign_val / 10000, 2)
+                                    result['institutional_net_1d'] = round(inst_val / 10000, 2)
+
+                                foreign_sum += foreign_val
+                                institutional_sum += inst_val
+                                count += 1
+                                break
+
+                except Exception as e:
+                    logger.debug(f"KRX API 실패: {e}")
+                    continue
+
+            if count > 0:
+                break
+
+        if count > 0:
+            result['foreign_net'] = round(foreign_sum / 10000, 2)
+            result['institutional_net'] = round(institutional_sum / 10000, 2)
+
+        return result
+
+    def _collect_etf_data_krx(self, code: str) -> SupplyDemandData:
+        """KRX API에서 ETF 괴리율 수집"""
+        result: SupplyDemandData = {}
+
+        if not self._krx_api_key:
+            return result
+
+        today = date.today()
+
+        for attempt in range(5):
+            try:
+                target_date = today - timedelta(days=attempt)
+                bas_dd = target_date.strftime('%Y%m%d')
+
+                url = "https://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd"
+                response = _session.get(
+                    url,
+                    headers={"AUTH_KEY": self._krx_api_key},
+                    params={"basDd": bas_dd},
+                    timeout=5
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'OutBlock_1' in data:
+                        for row in data['OutBlock_1']:
+                            isu_cd = str(row.get('ISU_CD', '')).strip()
+                            if isu_cd == code or isu_cd.endswith(code) or code in isu_cd:
+                                nav_str = row.get('NAV')
+                                close_str = row.get('TDD_CLSPRC')
+
+                                if nav_str and close_str:
+                                    nav = float(str(nav_str).replace(',', ''))
+                                    close = float(str(close_str).replace(',', ''))
+
+                                    if nav > 0 and close > 0:
+                                        ratio = close / nav
+                                        if 0.5 <= ratio <= 2.0:
+                                            disparity = ((close - nav) / nav) * 100
+                                            result['disparity_rate'] = round(disparity, 2)
+                                            return result
+
+            except Exception as e:
+                logger.debug(f"ETF API 실패: {e}")
+                continue
+
+        return result
+
+    def _collect_from_naver(self, code: str) -> SupplyDemandData:
+        """네이버 금융 크롤링"""
+        result: SupplyDemandData = {}
+
+        try:
+            url = f"https://finance.naver.com/item/frgn.naver?code={code}"
+            response = _session.get(
+                url,
+                headers={**HEADERS, 'Referer': 'https://finance.naver.com/'},
+                timeout=10
+            )
+
+            content = response.content.decode('euc-kr', 'replace')
+            soup = BeautifulSoup(content, 'html.parser')
+
+            foreign_sum = 0.0
+            inst_sum = 0.0
+            count = 0
+
+            tables = soup.select('table')
+            for table in tables:
+                if '외국인' in table.get_text() or '기관' in table.get_text():
+                    rows = table.select('tr')
+                    headers = [h.get_text(strip=True) for h in rows[0].select('th, td')]
+
+                    foreign_idx = None
+                    inst_idx = None
+                    for i, h in enumerate(headers):
+                        if '외국인' in h or '외인' in h:
+                            foreign_idx = i
+                        elif '기관' in h:
+                            inst_idx = i
+
+                    if foreign_idx is None and inst_idx is None:
+                        continue
+
+                    data_start = 2 if len(rows) > 1 and '순매매량' in rows[1].get_text() else 1
+
+                    for row in rows[data_start:data_start + 3]:
+                        tds = row.select('td, th')
+                        date_text = tds[0].get_text(strip=True) if tds else ""
+                        if not date_text or '.' not in date_text:
+                            continue
+
+                        if foreign_idx and foreign_idx < len(tds):
+                            val = self._parse_naver_value(tds[foreign_idx].get_text(strip=True))
+                            if val is not None:
+                                foreign_sum += val
+                                if count == 0:
+                                    result['foreign_net_1d'] = round(val, 2)
+
+                        if inst_idx and inst_idx < len(tds):
+                            val = self._parse_naver_value(tds[inst_idx].get_text(strip=True))
+                            if val is not None:
+                                inst_sum += val
+                                if count == 0:
+                                    result['institutional_net_1d'] = round(val, 2)
+
+                        count += 1
+                        if count >= 3:
+                            break
+
+                    if count > 0:
+                        result['foreign_net'] = round(foreign_sum, 2)
+                        result['institutional_net'] = round(inst_sum, 2)
+                        break
+
+        except Exception as e:
+            logger.debug(f"네이버 크롤링 실패: {e}")
+
+        return result
+
+    def _collect_with_yfinance(self, ticker_code: str) -> SupplyDemandData:
+        """yfinance를 사용한 해외 주식 데이터 수집"""
+        result: SupplyDemandData = {}
+
+        try:
+            import yfinance as yf
+            stock = yf.Ticker(ticker_code)
+            info = stock.info
+
+            if info:
+                held = info.get('heldPercentInstitutions')
+                if held is not None:
+                    result['institutional_net'] = round(float(held) * 100, 2)
+
+                avg_vol = info.get('averageVolume')
+                if avg_vol:
+                    result['total_volume'] = float(avg_vol)
+
+        except Exception as e:
+            logger.debug(f"yfinance 실패: {e}")
+
+        return result
+
+    def _parse_numeric(self, value) -> float:
+        """숫자 파싱"""
+        try:
+            if isinstance(value, (int, float)):
+                return float(value)
+            return float(str(value).replace(',', ''))
+        except (ValueError, TypeError):
+            return 0.0
+
+    def _parse_naver_value(self, text: str) -> Optional[float]:
+        """네이버 금융 값 파싱"""
+        try:
+            clean = text.replace(',', '').replace('+', '').replace('(', '').replace(')', '').strip()
+            if clean and clean != '-':
+                return float(clean) / 10000  # 만주 변환
+        except (ValueError, AttributeError):
+            pass
+        return None
+
+    def _collect_korean_stock(self, ticker_code: str) -> SupplyDemandData:
+        """한국 주식 데이터 수집 (Fallback 체인)"""
+        code = ticker_code.replace('.KS', '').replace('.KQ', '')
+        result: SupplyDemandData = {}
+
+        # 1. pykrx 시도
+        pykrx_data = self._collect_with_pykrx(code)
+        if pykrx_data.get('foreign_net') is not None:
+            result.update(pykrx_data)
+            logger.debug(f"{ticker_code}: pykrx 성공")
+
+        # 2. KRX API 시도 (보완)
+        if result.get('foreign_net') is None:
+            krx_data = self._collect_with_krx_api(code)
+            if krx_data.get('foreign_net') is not None:
+                result.update(krx_data)
+                logger.debug(f"{ticker_code}: KRX API 성공")
+
+        # 3. 네이버 크롤링 (최종 폴백)
+        if result.get('foreign_net') is None:
+            naver_data = self._collect_from_naver(code)
+            result.update(naver_data)
+            logger.debug(f"{ticker_code}: 네이버 크롤링 사용")
+
+        # 4. ETF 괴리율
+        etf_data = self._collect_etf_data_krx(code)
+        if etf_data.get('disparity_rate') is not None:
+            result['disparity_rate'] = etf_data['disparity_rate']
+
+        return result
+
+    def _collect_sync(self, ticker_code: str) -> SupplyDemandData:
+        """동기 방식으로 데이터 수집"""
+        if self._is_korean_stock(ticker_code):
+            return self._collect_korean_stock(ticker_code)
+        else:
+            return self._collect_with_yfinance(ticker_code)

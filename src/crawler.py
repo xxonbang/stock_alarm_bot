@@ -2808,9 +2808,74 @@ def get_global_institutional_data(ticker_symbol: str) -> Optional[float]:
         if held_percent is not None:
             held_percent = float(held_percent) * 100  # 소수점을 퍼센트로 변환
             return round(held_percent, 2)
-        
+
         return None
-        
+
     except Exception as e:
         logger.debug(f"{ticker_symbol} 기관 보유 비중 수집 실패: {e}")
         return None
+
+
+def get_kr_stock_data_v2(ticker_code: str) -> Dict[str, Optional[float]]:
+    """
+    듀얼 소스 시스템을 사용한 국내 주식 데이터 수집 (병렬 수집 + 교차 검증)
+
+    기존 get_kr_stock_data() 함수와 동일한 반환 형식을 유지하여 호환성을 보장합니다.
+    추가로 신뢰도(_confidence)와 검증 상태(_validation_status) 메타데이터를 포함합니다.
+
+    Args:
+        ticker_code: 국내 티커 코드 (예: '005930.KS', '379810.KS')
+
+    Returns:
+        {
+            'foreign_net': 외국인 순매매량 (만 주, 최근 3거래일 합계),
+            'institutional_net': 기관 순매매량 (만 주, 최근 3거래일 합계),
+            'foreign_net_1d': 외국인 순매매량 (만 주, 최근 1거래일),
+            'institutional_net_1d': 기관 순매매량 (만 주, 최근 1거래일),
+            'disparity_rate': ETF 괴리율 (NAV 대비 %, ETF가 아닐 경우 None),
+            'total_volume': 전체 거래량 (주 단위, 최근 3거래일 합계),
+            'total_volume_1d': 전체 거래량 (주 단위, 최근 1거래일),
+            '_confidence': 데이터 신뢰도 (0~100%),
+            '_validation_status': 검증 상태 (match, partial, conflict, single, empty)
+        }
+    """
+    try:
+        from src.dual_source import get_collector
+
+        collector = get_collector()
+        validated = collector.collect_sync(ticker_code)
+
+        # 기존 반환 형식으로 변환
+        data = validated.get('data', {})
+        result: Dict[str, Optional[float]] = {
+            'foreign_net': data.get('foreign_net'),
+            'institutional_net': data.get('institutional_net'),
+            'foreign_net_1d': data.get('foreign_net_1d'),
+            'institutional_net_1d': data.get('institutional_net_1d'),
+            'disparity_rate': data.get('disparity_rate'),
+            'total_volume': data.get('total_volume'),
+            'total_volume_1d': data.get('total_volume_1d'),
+            # 추가 메타데이터
+            '_confidence': validated.get('confidence', 0.0),
+            '_validation_status': validated.get('validation', {}).get('status', 'unknown'),
+        }
+
+        # ValidationStatus enum을 문자열로 변환
+        status = result.get('_validation_status')
+        if hasattr(status, 'value'):
+            result['_validation_status'] = status.value
+
+        logger.debug(
+            f"{ticker_code} 듀얼 소스 v2: "
+            f"신뢰도={result['_confidence']:.1f}%, "
+            f"상태={result['_validation_status']}"
+        )
+
+        return result
+
+    except ImportError as e:
+        logger.warning(f"듀얼 소스 모듈 로드 실패, 기존 방식으로 폴백: {e}")
+        return get_kr_stock_data(ticker_code)
+    except Exception as e:
+        logger.error(f"{ticker_code} 듀얼 소스 v2 수집 실패, 기존 방식으로 폴백: {e}")
+        return get_kr_stock_data(ticker_code)

@@ -33,3 +33,7 @@ deep-translator>=1.11.4
 # 로깅 및 유틸리티는 표준 라이브러리 사용
 
 urllib3>=2.0.0
+
+# 브라우저 자동화 (Agentic Screenshot 용)
+# Puppeteer의 Python 대안
+playwright>=1.40.0

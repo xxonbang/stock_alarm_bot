@@ -85,6 +85,11 @@ class Settings:
                 # logger가 아직 초기화되지 않았을 수 있으므로 print 사용
                 import sys
                 print(f"⚠️ KRX_API_KEY_EXPIRY 형식 오류: {krx_expiry_str} (YYYY-MM-DD 형식 필요)", file=sys.stderr)
+
+        # 듀얼 소스 시스템 활성화 여부 (환경변수 USE_DUAL_SOURCE로 제어)
+        # 기본값: False (기존 방식 유지)
+        use_dual_source_str = os.getenv('USE_DUAL_SOURCE', 'false').lower()
+        self.use_dual_source = use_dual_source_str in ('true', '1', 'yes', 'on')
     
     def __repr__(self):
         return f"Settings(tickers={len(self.tickers)}개, schedule_times={len(self.schedule_times)}개)"
