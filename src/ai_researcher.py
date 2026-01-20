@@ -215,30 +215,25 @@ class AIResearcher:
                 
                 # API 키 fallback 시도 (429 에러 또는 할당량 초과 시)
                 if is_quota_exceeded and attempt == 0:
-                    # 첫 시도에서 할당량 초과 시
-                    # 현재 기본 키를 사용 중이면 fallback 키로 전환
+                    # 첫 시도에서 할당량 초과 시 fallback 키로 전환
                     if self.current_api_key == self.api_key and self.fallback_api_key:
                         if self._switch_to_fallback():
                             logger.info("Fallback API 키로 재시도...")
                             print("🔄 Fallback API 키로 재시도...")
                             continue
-                elif is_quota_exceeded and attempt == 1:
-                    # 두 번째 시도에서도 할당량 초과 시
-                    # 현재 fallback 키를 사용 중이면 기본 키로 전환
-                    if self.current_api_key == self.fallback_api_key and self.api_key:
-                        if self._switch_to_fallback():
-                            logger.info("기본 API 키로 재시도...")
-                            print("🔄 기본 API 키로 재시도...")
-                            continue
-                
-                if is_quota_exceeded and attempt >= max_retries - 1:
-                    # 모든 재시도 실패 후 최종 실패
-                    error_msg = f"❌ API 할당량 초과 (Quota Exceeded): 모든 API 키의 할당량을 모두 사용했습니다. 다음 청구 주기까지 대기하거나 유료 플랜으로 업그레이드하세요."
+                    # fallback 키가 없으면 즉시 실패 처리
+                    if not self.fallback_api_key:
+                        error_msg = "❌ API 할당량 초과 (Quota Exceeded): Fallback API 키가 설정되지 않았습니다."
+                        print(error_msg)
+                        logger.error(error_msg)
+                        logger.error(f"에러 상세: {error_str}")
+                        return "API 할당량 초과(429 Error)", {}
+                elif is_quota_exceeded and attempt >= 1:
+                    # 두 번째 키도 실패 시 즉시 최종 실패 처리 (모든 API 키 소진)
+                    error_msg = "❌ API 할당량 초과 (Quota Exceeded): 모든 API 키의 할당량을 모두 사용했습니다. 다음 청구 주기까지 대기하거나 유료 플랜으로 업그레이드하세요."
                     print(error_msg)
                     logger.error(error_msg)
                     logger.error(f"에러 상세: {error_str}")
-                    logger.error(f"전체 에러 정보:\n{error_traceback}")
-                    # 텔레그램 메시지에는 간단한 메시지만 포함
                     return "API 할당량 초과(429 Error)", {}
                 
                 elif (is_dns_error or is_timeout or is_server_overloaded) and attempt < max_retries - 1:
