@@ -18,7 +18,9 @@
       "Bash(python:*)",
       "Bash(ls:*)",
       "Bash(tee:*)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "WebFetch(domain:discuss.ai.google.dev)",
+      "WebFetch(domain:ai.google.dev)"
     ]
   }
 }

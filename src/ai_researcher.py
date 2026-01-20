@@ -421,11 +421,12 @@ Detailed 리포트 내용
 XML 태그 없이 출력하면 안 됩니다. 반드시 <COMPACT_REPORT>와 <DETAILED_REPORT> 태그로 감싸십시오."""
 
         # 단일 API 호출
-        # Gemini 2.5는 thinking 토큰이 maxOutputTokens에 포함됨
+        # Gemini 2.5 Flash: 최대 65,536 토큰 (thinking 토큰 포함)
+        # 비용은 실제 생성 토큰만 청구되므로 최대값 설정이 안전
         result, usage_info = self._call_ai(
             prompt=combined_prompt,
             temperature=0.4,
-            max_output_tokens=16000,
+            max_output_tokens=65536,
             system_instruction=system_instruction
         )
 
