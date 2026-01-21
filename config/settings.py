@@ -87,8 +87,8 @@ class Settings:
                 print(f"⚠️ KRX_API_KEY_EXPIRY 형식 오류: {krx_expiry_str} (YYYY-MM-DD 형식 필요)", file=sys.stderr)
 
         # 듀얼 소스 시스템 활성화 여부 (환경변수 USE_DUAL_SOURCE로 제어)
-        # 기본값: False (기존 방식 유지)
-        use_dual_source_str = os.getenv('USE_DUAL_SOURCE', 'false').lower()
+        # 기본값: True (듀얼 소스 사용, 실패 시 기존 방식으로 fallback)
+        use_dual_source_str = os.getenv('USE_DUAL_SOURCE', 'true').lower()
         self.use_dual_source = use_dual_source_str in ('true', '1', 'yes', 'on')
     
     def __repr__(self):
