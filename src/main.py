@@ -249,11 +249,15 @@ KRX Data Marketplace에서 인증키 상태를 확인하고 갱신해 주세요.
             logger.debug(f"KRX API 상태 확인 실패: {e}")
         
         # 0. 바리케이트 메시지 전송 (이전 메시지 뭉치와 구분) - 일자 정보 포함
+        # 듀얼 소스 상태 확인
+        data_source_status = "🔄 듀얼 소스 (Agentic + API 병렬 수집)" if settings.use_dual_source else "📡 기존 방식 (순차 API 수집)"
+
         barrier_message = f"""<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
 <b>🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧</b>
 <b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
 <b>📅 리포트 생성 시간: {date_time_str} (KST)</b>
 <b>📊 새로운 리포트 시작</b>
+<b>{data_source_status}</b>
 <b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>"""
         
         if notifier.send_message(barrier_message):
