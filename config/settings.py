@@ -3,8 +3,12 @@
 환경변수와 config.yaml을 로드하여 사용
 """
 import os
+import logging
 import yaml
 from pathlib import Path
+from typing import Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 # .env 파일 로드 (로컬 개발용)
 try:
@@ -61,14 +65,22 @@ class Settings:
         self.telegram_token = get_env_var('TELEGRAM_TOKEN')
         self.chat_id = get_env_var('CHAT_ID')
         
-        # Google API Keys (01, 02로 구분)
-        # 01번 키 (필수), 02번 키 (선택적, fallback용)
+        # Google API Keys (01, 02, 03으로 구분)
+        # 01번 키 (필수), 02/03번 키 (선택적, fallback용)
         self.google_api_key_01 = get_env_var('GOOGLE_API_KEY_01')
-        # 02번 키는 선택적 (fallback용이므로 없어도 됨)
+        # 02번, 03번 키는 선택적 (fallback용이므로 없어도 됨)
         self.google_api_key_02 = os.getenv('GOOGLE_API_KEY_02', None)
-        
+        self.google_api_key_03 = os.getenv('GOOGLE_API_KEY_03', None)
+
         # 기본값은 01번 키 (하위 호환성)
         self.google_api_key = self.google_api_key_01
+
+        # 사용 가능한 모든 API 키 리스트 (fallback 순서대로)
+        self.google_api_keys = [self.google_api_key_01]
+        if self.google_api_key_02:
+            self.google_api_keys.append(self.google_api_key_02)
+        if self.google_api_key_03:
+            self.google_api_keys.append(self.google_api_key_03)
         
         # KRX API Key (optional, 없어도 기존 기능 동작)
         self.krx_api_key = os.getenv('KRX_API_KEY', None)
@@ -97,4 +109,116 @@ class Settings:
 
 # 싱글톤 인스턴스
 settings = Settings()
+
+
+class GoogleAPIKeyManager:
+    """
+    Google API 키 관리자 (세션 전체에서 공유)
+
+    - 여러 API 키를 순차적으로 fallback
+    - 세션 동안 성공한 키를 기억하여 불필요한 재시도 방지
+    - AIResearcher, AgenticScreenshotSource 등에서 공유 사용
+    """
+
+    _instance: Optional['GoogleAPIKeyManager'] = None
+
+    def __new__(cls):
+        """싱글톤 패턴"""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+
+        self._api_keys = settings.google_api_keys.copy()
+        self._current_index = 0
+        self._exhausted_keys = set()  # 할당량 초과된 키 인덱스
+        self._initialized = True
+
+        logger.info(f"🔑 Google API 키 매니저 초기화: {len(self._api_keys)}개 키 사용 가능")
+
+    @property
+    def current_key(self) -> str:
+        """현재 사용 중인 API 키"""
+        return self._api_keys[self._current_index]
+
+    @property
+    def current_key_number(self) -> int:
+        """현재 사용 중인 키 번호 (1부터 시작)"""
+        return self._current_index + 1
+
+    @property
+    def total_keys(self) -> int:
+        """전체 키 개수"""
+        return len(self._api_keys)
+
+    @property
+    def available_keys_count(self) -> int:
+        """사용 가능한 키 개수 (소진되지 않은)"""
+        return len(self._api_keys) - len(self._exhausted_keys)
+
+    def get_current_key(self) -> Tuple[str, int]:
+        """
+        현재 사용할 API 키 반환
+
+        Returns:
+            (API 키, 키 번호)
+        """
+        return self.current_key, self.current_key_number
+
+    def mark_key_exhausted(self, key_index: Optional[int] = None) -> bool:
+        """
+        현재 키를 할당량 초과로 표시하고 다음 키로 전환
+
+        Args:
+            key_index: 소진된 키 인덱스 (None이면 현재 키)
+
+        Returns:
+            다음 키로 전환 성공 여부
+        """
+        if key_index is None:
+            key_index = self._current_index
+
+        self._exhausted_keys.add(key_index)
+        logger.warning(f"⚠️ API 키 #{key_index + 1:02d} 할당량 초과로 표시됨")
+
+        return self._switch_to_next_available()
+
+    def _switch_to_next_available(self) -> bool:
+        """
+        다음 사용 가능한 키로 전환
+
+        Returns:
+            전환 성공 여부
+        """
+        # 다음 사용 가능한 키 찾기
+        for i in range(self._current_index + 1, len(self._api_keys)):
+            if i not in self._exhausted_keys:
+                old_index = self._current_index
+                self._current_index = i
+                logger.info(f"🔄 API 키 전환: #{old_index + 1:02d} → #{i + 1:02d}")
+                print(f"🔄 API 키 전환: #{old_index + 1:02d} → #{i + 1:02d}")
+                return True
+
+        logger.error(f"❌ 모든 API 키({len(self._api_keys)}개) 할당량 초과")
+        return False
+
+    def reset(self):
+        """키 상태 초기화 (새 세션 시작 시)"""
+        self._current_index = 0
+        self._exhausted_keys.clear()
+        logger.info("🔑 API 키 매니저 리셋: 모든 키 사용 가능")
+
+    def is_all_exhausted(self) -> bool:
+        """모든 키가 소진되었는지 확인"""
+        return len(self._exhausted_keys) >= len(self._api_keys)
+
+
+# 전역 API 키 매니저 인스턴스
+def get_api_key_manager() -> GoogleAPIKeyManager:
+    """Google API 키 매니저 싱글톤 인스턴스 반환"""
+    return GoogleAPIKeyManager()
 

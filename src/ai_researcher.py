@@ -19,32 +19,24 @@ logger = logging.getLogger(__name__)
 
 class AIResearcher:
     """AI 리서처 클래스 - 수집된 텍스트를 요약만 수행"""
-    
-    def __init__(self, api_key: str, fallback_api_key: str = None):
+
+    def __init__(self):
         """
-        Args:
-            api_key: Google AI API Key (기본 키)
-            fallback_api_key: Fallback API Key (기본 키 실패 시 사용)
+        공유 API 키 매니저를 사용하여 초기화
+        세션 동안 성공한 키를 기억하여 불필요한 재시도 방지
         """
-        self.api_key = api_key
-        self.fallback_api_key = fallback_api_key
-        self.current_api_key = api_key
-        self._initialize_client(api_key)
+        from config.settings import get_api_key_manager
+        self._key_manager = get_api_key_manager()
+        self._initialize_client()
     
-    def _initialize_client(self, api_key: str):
-        """클라이언트 초기화"""
+    def _initialize_client(self):
+        """클라이언트 초기화 (공유 키 매니저에서 현재 키 사용)"""
         try:
+            api_key, key_number = self._key_manager.get_current_key()
             self.client = genai.Client(api_key=api_key)
-            # 현재 지원되는 최신 모델 사용
             self.model_name = 'gemini-2.5-flash'
-            self.current_api_key = api_key
-            # 현재 사용 중인 키가 기본 키인지 fallback 키인지 확인
-            if api_key == self.api_key:
-                key_label = "기본"
-            elif api_key == self.fallback_api_key:
-                key_label = "Fallback"
-            else:
-                key_label = "알 수 없음"
+
+            key_label = "기본(01)" if key_number == 1 else f"Fallback({key_number:02d})"
             logger.info(f"✅ Google GenAI v2 클라이언트 초기화 완료 ({key_label} 키): {self.model_name}")
             print(f"✅ Google GenAI v2 클라이언트 초기화 완료 ({key_label} 키): {self.model_name}")
         except Exception as e:
@@ -55,22 +47,13 @@ class AIResearcher:
     
     def _switch_to_fallback(self):
         """
-        Fallback API 키로 전환 (양방향 지원)
-        
-        - 현재 기본 키를 사용 중이고 fallback 키가 있으면 → fallback 키로 전환
-        - 현재 fallback 키를 사용 중이고 기본 키가 있으면 → 기본 키로 전환
+        다음 API 키로 전환 (공유 키 매니저 사용)
+
+        - 현재 키를 소진 표시하고 다음 키로 전환
+        - 세션 동안 소진된 키는 다시 시도하지 않음
         """
-        # 현재 기본 키를 사용 중이고 fallback 키가 있으면 fallback 키로 전환
-        if self.current_api_key == self.api_key and self.fallback_api_key:
-            logger.warning("⚠️ 기본 API 키 실패, Fallback API 키로 전환 시도...")
-            print("⚠️ 기본 API 키 실패, Fallback API 키로 전환 시도...")
-            self._initialize_client(self.fallback_api_key)
-            return True
-        # 현재 fallback 키를 사용 중이고 기본 키가 있으면 기본 키로 전환
-        elif self.current_api_key == self.fallback_api_key and self.api_key:
-            logger.warning("⚠️ Fallback API 키 실패, 기본 API 키로 전환 시도...")
-            print("⚠️ Fallback API 키 실패, 기본 API 키로 전환 시도...")
-            self._initialize_client(self.api_key)
+        if self._key_manager.mark_key_exhausted():
+            self._initialize_client()
             return True
         return False
     
@@ -214,23 +197,15 @@ class AIResearcher:
                 )
                 
                 # API 키 fallback 시도 (429 에러 또는 할당량 초과 시)
-                if is_quota_exceeded and attempt == 0:
-                    # 첫 시도에서 할당량 초과 시 fallback 키로 전환
-                    if self.current_api_key == self.api_key and self.fallback_api_key:
-                        if self._switch_to_fallback():
-                            logger.info("Fallback API 키로 재시도...")
-                            print("🔄 Fallback API 키로 재시도...")
-                            continue
-                    # fallback 키가 없으면 즉시 실패 처리
-                    if not self.fallback_api_key:
-                        error_msg = "❌ API 할당량 초과 (Quota Exceeded): Fallback API 키가 설정되지 않았습니다."
-                        print(error_msg)
-                        logger.error(error_msg)
-                        logger.error(f"에러 상세: {error_str}")
-                        return "API 할당량 초과(429 Error)", {}
-                elif is_quota_exceeded and attempt >= 1:
-                    # 두 번째 키도 실패 시 즉시 최종 실패 처리 (모든 API 키 소진)
-                    error_msg = "❌ API 할당량 초과 (Quota Exceeded): 모든 API 키의 할당량을 모두 사용했습니다. 다음 청구 주기까지 대기하거나 유료 플랜으로 업그레이드하세요."
+                if is_quota_exceeded:
+                    # 다음 fallback 키로 전환 시도
+                    if self._switch_to_fallback():
+                        logger.info(f"Fallback API 키 #{self._key_manager.current_key_number:02d}로 재시도...")
+                        print(f"🔄 Fallback API 키 #{self._key_manager.current_key_number:02d}로 재시도...")
+                        continue
+                    # 모든 키 소진 시 즉시 실패 처리
+                    total_keys = self._key_manager.total_keys
+                    error_msg = f"❌ API 할당량 초과 (Quota Exceeded): 모든 API 키({total_keys}개)의 할당량을 모두 사용했습니다. 다음 청구 주기까지 대기하거나 유료 플랜으로 업그레이드하세요."
                     print(error_msg)
                     logger.error(error_msg)
                     logger.error(f"에러 상세: {error_str}")
@@ -638,15 +613,14 @@ XML 태그 없이 출력하면 안 됩니다. 반드시 <COMPACT_REPORT>와 <DET
         return result_text
 
 
-def create_researcher(api_key: str, fallback_api_key: str = None) -> AIResearcher:
+def create_researcher() -> AIResearcher:
     """
-    AIResearcher 인스턴스 생성 헬퍼 함수 (fallback 키 지원)
-    
-    Args:
-        api_key: Google AI API Key (기본 키)
-        fallback_api_key: Fallback API Key (기본 키 실패 시 사용)
-    
+    AIResearcher 인스턴스 생성 헬퍼 함수
+
+    공유 API 키 매니저를 사용하여 세션 동안 성공한 키를 기억합니다.
+    불필요한 재시도 없이 이미 성공한 키를 바로 사용합니다.
+
     Returns:
         AIResearcher 인스턴스
     """
-    return AIResearcher(api_key, fallback_api_key)
+    return AIResearcher()

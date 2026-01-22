@@ -168,8 +168,11 @@ def main():
         
         # Step 6: AI 초기화 (리포트 생성용)
         logger.info("\n[Step 6] AI 리포트 생성 준비...")
-        # AI researcher 초기화 (fallback 키 포함)
-        researcher = create_researcher(settings.google_api_key_01, settings.google_api_key_02)
+        # AI researcher 초기화 (공유 API 키 매니저 사용)
+        from config.settings import get_api_key_manager
+        key_manager = get_api_key_manager()
+        logger.info(f"  사용 가능한 Google API 키: {key_manager.total_keys}개 (현재 #{key_manager.current_key_number})")
+        researcher = create_researcher()
         
         # Step 7: AI 일일 리포트 생성 (최종 1회 API 호출)
         logger.info("\n[Step 7] AI 일일 리포트 생성 시작 (최종 1회 API 호출)...")

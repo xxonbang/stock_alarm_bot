@@ -42,14 +42,12 @@ class DualSourceCollector:
 
     def __init__(
         self,
-        google_api_key: Optional[str] = None,
         krx_api_key: Optional[str] = None,
         timeout: float = 30.0,
         enable_agentic: bool = True,
     ):
         """
         Args:
-            google_api_key: Google AI API Key (Agentic Screenshot용)
             krx_api_key: KRX OpenAPI 인증키 (전통적 API용)
             timeout: 수집 타임아웃 (초)
             enable_agentic: Agentic Screenshot 활성화 여부 (서버리스 환경에서 비활성화)
@@ -63,10 +61,10 @@ class DualSourceCollector:
             self._enable_agentic = False
             logger.info("서버리스 환경 감지: Agentic Screenshot 비활성화")
 
-        # Source A: Agentic Screenshot (Playwright + Gemini Vision)
+        # Source A: Agentic Screenshot (Playwright + Gemini Vision, 공유 키 매니저 사용)
         self._source_a: Optional[AgenticScreenshotSource] = None
         if self._enable_agentic:
-            self._source_a = AgenticScreenshotSource(google_api_key=google_api_key)
+            self._source_a = AgenticScreenshotSource()
 
         # Source B: 전통적 API (pykrx, KRX API, 네이버, yfinance)
         self._source_b = TraditionalAPISource(krx_api_key=krx_api_key)
@@ -248,15 +246,15 @@ _default_collector: Optional[DualSourceCollector] = None
 
 
 def get_collector(
-    google_api_key: Optional[str] = None,
     krx_api_key: Optional[str] = None,
     enable_agentic: bool = True,
 ) -> DualSourceCollector:
     """
     기본 컬렉터 인스턴스를 반환합니다.
 
+    Google API 키는 공유 키 매니저를 통해 관리됩니다.
+
     Args:
-        google_api_key: Google AI API Key (없으면 설정에서 로드)
         krx_api_key: KRX API 키 (없으면 설정에서 로드)
         enable_agentic: Agentic Screenshot 활성화 여부
 
@@ -266,18 +264,15 @@ def get_collector(
     global _default_collector
 
     if _default_collector is None:
-        # 설정에서 API 키 로드
+        # 설정에서 KRX API 키 로드
         try:
             from config.settings import settings
-            if google_api_key is None:
-                google_api_key = settings.google_api_key
             if krx_api_key is None:
                 krx_api_key = settings.krx_api_key
         except Exception:
             pass
 
         _default_collector = DualSourceCollector(
-            google_api_key=google_api_key,
             krx_api_key=krx_api_key,
             enable_agentic=enable_agentic,
         )

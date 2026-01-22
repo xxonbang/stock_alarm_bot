@@ -83,13 +83,13 @@ class AgenticScreenshotSource(DataSourceBase):
     def __init__(self, google_api_key: Optional[str] = None):
         """
         Args:
-            google_api_key: Google AI API Key (Gemini Vision용)
+            google_api_key: Google AI API Key (Gemini Vision용) - 무시됨, 공유 키 매니저 사용
         """
         super().__init__()
-        self._api_key = google_api_key
         self._browser = None
         self._playwright = None
         self._client = None
+        self._key_manager = None  # 지연 초기화
 
     @property
     def source_name(self) -> str:
@@ -130,24 +130,19 @@ class AgenticScreenshotSource(DataSourceBase):
             raise
 
     def _init_gemini_client(self):
-        """Gemini 클라이언트 초기화"""
-        if self._client is not None:
-            return
+        """Gemini 클라이언트 초기화 (공유 키 매니저 사용)"""
+        # 키 매니저 초기화
+        if self._key_manager is None:
+            from config.settings import get_api_key_manager
+            self._key_manager = get_api_key_manager()
 
-        if not self._api_key:
-            try:
-                from config.settings import settings
-                self._api_key = settings.google_api_key
-            except Exception:
-                pass
-
-        if not self._api_key:
-            raise ValueError("Google API Key가 설정되지 않았습니다")
+        # 현재 키로 클라이언트 생성
+        api_key, key_number = self._key_manager.get_current_key()
 
         try:
             from google import genai
-            self._client = genai.Client(api_key=self._api_key)
-            logger.debug("Gemini 클라이언트 초기화 완료")
+            self._client = genai.Client(api_key=api_key)
+            logger.debug(f"Gemini 클라이언트 초기화 완료 (키 #{key_number:02d})")
         except Exception as e:
             logger.error(f"Gemini 클라이언트 초기화 실패: {e}")
             raise
@@ -197,7 +192,7 @@ class AgenticScreenshotSource(DataSourceBase):
 
     def _extract_data_with_vision(self, screenshot: bytes, prompt: str) -> Dict[str, Any]:
         """
-        Gemini Vision AI로 스크린샷에서 데이터 추출
+        Gemini Vision AI로 스크린샷에서 데이터 추출 (할당량 초과 시 자동 fallback)
 
         Args:
             screenshot: PNG 이미지 바이트
@@ -206,34 +201,71 @@ class AgenticScreenshotSource(DataSourceBase):
         Returns:
             추출된 데이터 딕셔너리
         """
-        self._init_gemini_client()
-
         from google.genai import types
 
-        # 이미지를 Base64로 인코딩
-        image_base64 = base64.b64encode(screenshot).decode('utf-8')
+        # 키 매니저 초기화
+        if self._key_manager is None:
+            from config.settings import get_api_key_manager
+            self._key_manager = get_api_key_manager()
 
-        # Vision API 호출
-        response = self._client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[
-                types.Part.from_bytes(
-                    data=screenshot,
-                    mime_type='image/png'
-                ),
-                prompt
-            ],
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=65536,  # Gemini 2.5 Flash 최대값
-            )
-        )
+        max_attempts = self._key_manager.total_keys
+        last_error = None
 
-        response_text = response.text if hasattr(response, 'text') else ""
-        logger.debug(f"Vision API 응답: {response_text[:500]}")
+        for attempt in range(max_attempts):
+            try:
+                # 클라이언트 초기화 (현재 키 사용)
+                self._init_gemini_client()
 
-        # JSON 파싱
-        return self._parse_json_response(response_text)
+                # Vision API 호출
+                response = self._client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=[
+                        types.Part.from_bytes(
+                            data=screenshot,
+                            mime_type='image/png'
+                        ),
+                        prompt
+                    ],
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=65536,
+                    )
+                )
+
+                response_text = response.text if hasattr(response, 'text') else ""
+                logger.debug(f"Vision API 응답 (키 #{self._key_manager.current_key_number:02d}): {response_text[:500]}")
+
+                # JSON 파싱
+                return self._parse_json_response(response_text)
+
+            except Exception as e:
+                error_str = str(e)
+                last_error = e
+
+                # 할당량 초과 에러 감지
+                is_quota_exceeded = (
+                    'quota' in error_str.lower() or
+                    'Quota exceeded' in error_str or
+                    '429' in error_str
+                )
+
+                if is_quota_exceeded:
+                    logger.warning(f"⚠️ Vision API 키 #{self._key_manager.current_key_number:02d} 할당량 초과")
+                    # 다음 키로 전환 시도
+                    if self._key_manager.mark_key_exhausted():
+                        self._client = None  # 클라이언트 재초기화 필요
+                        continue
+                    else:
+                        logger.error("❌ 모든 API 키 할당량 초과")
+                        break
+                else:
+                    # 기타 에러는 바로 실패
+                    logger.error(f"Vision API 에러: {error_str}")
+                    break
+
+        # 모든 시도 실패
+        logger.error(f"Vision API 호출 최종 실패: {last_error}")
+        return {}
 
     def _parse_json_response(self, response_text: str) -> Dict[str, Any]:
         """
