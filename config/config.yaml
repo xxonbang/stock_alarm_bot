@@ -36,7 +36,7 @@ tickers_interest_overseas: #관심주식_해외
   - "ETH-USD" # 이더리움
 
 # 알림 시간 설정 (로깅용, 실제 스케줄은 GitHub Actions에서 관리)
+# 하루 2회: 오전 8시, 밤 10시
 schedule_times:
   - "08:00 KST"
-  - "13:00 KST"
   - "22:00 KST"

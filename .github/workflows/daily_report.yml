@@ -2,10 +2,9 @@ name: Daily Stock Report
 
 on:
   schedule:
+    # 하루 2회 발송
     # KST 08:00 -> UTC 23:00 (전날)
     - cron: "0 23 * * *"
-    # KST 13:00 -> UTC 04:00
-    - cron: "0 4 * * *"
     # KST 22:00 -> UTC 13:00
     - cron: "0 13 * * *"
   workflow_dispatch: # 수동 실행도 가능
@@ -34,6 +33,7 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           GOOGLE_API_KEY_01: ${{ secrets.GOOGLE_API_KEY_01 }}
           GOOGLE_API_KEY_02: ${{ secrets.GOOGLE_API_KEY_02 }}
+          GOOGLE_API_KEY_03: ${{ secrets.GOOGLE_API_KEY_03 }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
           KRX_API_KEY_EXPIRY: ${{ secrets.KRX_API_KEY_EXPIRY }}
