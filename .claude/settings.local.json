@@ -20,7 +20,9 @@
       "Bash(tee:*)",
       "Bash(pip show:*)",
       "WebFetch(domain:discuss.ai.google.dev)",
-      "WebFetch(domain:ai.google.dev)"
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(playwright install:*)",
+      "Bash(test:*)"
     ]
   }
 }

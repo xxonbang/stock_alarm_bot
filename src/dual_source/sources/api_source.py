@@ -340,6 +340,22 @@ class TraditionalAPISource(DataSourceBase):
 
         return result
 
+    def _collect_with_twelvedata(self, ticker_code: str) -> SupplyDemandData:
+        """Twelve Data를 사용한 해외 주식 데이터 수집 (주요 Fallback)"""
+        result: SupplyDemandData = {}
+
+        try:
+            from .twelvedata_source import TwelveDataSource
+            td = TwelveDataSource()
+            if td._api_key:
+                result = td._collect_sync(ticker_code)
+                if result:
+                    logger.debug(f"{ticker_code}: Twelve Data 데이터 보완")
+        except Exception as e:
+            logger.debug(f"Twelve Data fallback 실패: {e}")
+
+        return result
+
     def _parse_numeric(self, value) -> float:
         """숫자 파싱"""
         try:
@@ -376,29 +392,29 @@ class TraditionalAPISource(DataSourceBase):
         return result
 
     def _collect_korean_stock(self, ticker_code: str) -> SupplyDemandData:
-        """한국 주식 데이터 수집 (Fallback 체인: pykrx → KRX API → KIS → 네이버)"""
+        """한국 주식 데이터 수집 (Fallback 체인: KIS → pykrx → KRX API → 네이버)"""
         code = ticker_code.replace('.KS', '').replace('.KQ', '')
         result: SupplyDemandData = {}
 
-        # 1. pykrx 시도 (Primary)
-        pykrx_data = self._collect_with_pykrx(code)
-        if pykrx_data.get('foreign_net') is not None:
-            result.update(pykrx_data)
-            logger.debug(f"{ticker_code}: pykrx 성공")
+        # 1. KIS API 시도 (Primary - 공식 증권사 API)
+        kis_data = self._collect_with_kis(ticker_code)
+        if kis_data.get('foreign_net') is not None or kis_data.get('foreign_net_1d') is not None:
+            result.update(kis_data)
+            logger.debug(f"{ticker_code}: KIS API 성공 (1순위)")
 
-        # 2. KRX API 시도 (보완)
+        # 2. pykrx 시도 (Fallback 1 - 무료, 안정적)
+        if result.get('foreign_net') is None:
+            pykrx_data = self._collect_with_pykrx(code)
+            if pykrx_data.get('foreign_net') is not None:
+                result.update(pykrx_data)
+                logger.debug(f"{ticker_code}: pykrx 성공")
+
+        # 3. KRX API 시도 (Fallback 2)
         if result.get('foreign_net') is None:
             krx_data = self._collect_with_krx_api(code)
             if krx_data.get('foreign_net') is not None:
                 result.update(krx_data)
                 logger.debug(f"{ticker_code}: KRX API 성공")
-
-        # 3. KIS API 시도 (추가 Fallback)
-        if result.get('foreign_net') is None:
-            kis_data = self._collect_with_kis(ticker_code)
-            if kis_data.get('foreign_net') is not None or kis_data.get('foreign_net_1d') is not None:
-                result.update(kis_data)
-                logger.debug(f"{ticker_code}: KIS API 성공")
 
         # 4. 네이버 크롤링 (최종 폴백)
         if result.get('foreign_net') is None:
@@ -414,25 +430,40 @@ class TraditionalAPISource(DataSourceBase):
         return result
 
     def _collect_overseas_stock(self, ticker_code: str) -> SupplyDemandData:
-        """해외 주식 데이터 수집 (Fallback 체인: yfinance → Finnhub → FMP)"""
+        """해외 주식 데이터 수집 (Fallback 체인: yfinance → Twelve Data → Finnhub → FMP)
+
+        우선순위 기준:
+        1. yfinance: 무료/무제한, 기관보유 제공, 단 비공식 API
+        2. Twelve Data: 800 calls/day, 안정적
+        3. Finnhub: 60 calls/min, 실시간 지원
+        4. FMP: 250 calls/day, 기관보유 제공 (호출 아껴 사용)
+        """
         result: SupplyDemandData = {}
 
-        # 1. yfinance 시도 (Primary)
+        # 1. yfinance 시도 (Primary - 무료, 기관보유 제공)
         yfinance_data = self._collect_with_yfinance(ticker_code)
         if yfinance_data:
             result.update(yfinance_data)
             logger.debug(f"{ticker_code}: yfinance 성공")
 
-        # 2. 데이터 보완 (institutional_net 없으면 Finnhub 시도)
-        if result.get('institutional_net') is None:
+        # 2. Twelve Data 시도 (800/day로 넉넉)
+        if result.get('total_volume_1d') is None:
+            td_data = self._collect_with_twelvedata(ticker_code)
+            if td_data:
+                for k, v in td_data.items():
+                    if result.get(k) is None:
+                        result[k] = v
+
+        # 3. Finnhub 시도 (60/min, 안정적)
+        if result.get('total_volume_1d') is None:
             finnhub_data = self._collect_with_finnhub(ticker_code)
             if finnhub_data:
                 for k, v in finnhub_data.items():
                     if result.get(k) is None:
                         result[k] = v
 
-        # 3. 추가 보완 (FMP 시도)
-        if result.get('institutional_net') is None or result.get('total_volume') is None:
+        # 4. FMP 시도 (기관보유 전용 - 250/day 아껴 사용)
+        if result.get('institutional_net') is None:
             fmp_data = self._collect_with_fmp(ticker_code)
             if fmp_data:
                 for k, v in fmp_data.items():

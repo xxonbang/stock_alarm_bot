@@ -110,11 +110,15 @@ class Settings:
         self.kis_app_key = os.getenv('KIS_APP_KEY', None)
         self.kis_app_secret = os.getenv('KIS_APP_SECRET', None)
 
+        # Twelve Data API (미국 주식 주요 Fallback)
+        # https://twelvedata.com 에서 무료 발급 (800 calls/day)
+        self.twelve_data_api_key = os.getenv('TWELVE_DATA_API_KEY', None)
+
         # Finnhub API (미국 주식 Fallback)
         # https://finnhub.io 에서 무료 발급 (60 calls/min)
         self.finnhub_api_key = os.getenv('FINNHUB_API_KEY', None)
 
-        # Financial Modeling Prep (FMP) API (미국 주식 Fallback)
+        # Financial Modeling Prep (FMP) API (미국 주식 Fallback, 기관보유 전용)
         # https://financialmodelingprep.com 에서 발급 (무료: 250 calls/day)
         self.fmp_api_key = os.getenv('FMP_API_KEY', None)
     

@@ -14,6 +14,7 @@ from .api_source import TraditionalAPISource
 from .kis_source import KISSource, get_kis_token_manager
 from .finnhub_source import FinnhubSource
 from .fmp_source import FMPSource
+from .twelvedata_source import TwelveDataSource
 
 __all__ = [
     'DataSourceBase',
@@ -22,5 +23,6 @@ __all__ = [
     'KISSource',
     'FinnhubSource',
     'FMPSource',
+    'TwelveDataSource',
     'get_kis_token_manager',
 ]
