@@ -404,19 +404,116 @@ headers = {
 | `analysis.py` | yfinance | 주가, 기술 지표, 수익률 |
 | `crawler.py` | RSS, 크롤링, FRED, yfinance | 뉴스, 매크로 지표 |
 | `dual_source/sources/agentic_source.py` | Playwright + Gemini Vision | 수급 데이터 (스크린샷) |
-| `dual_source/sources/api_source.py` | pykrx, KRX API, 크롤링 | 수급 데이터 (API) |
+| `dual_source/sources/api_source.py` | pykrx, KRX API, KIS, 크롤링 | 수급 데이터 (API) |
+| `dual_source/sources/kis_source.py` | 한국투자증권 API | 한국 주식 수급 (Fallback) |
+| `dual_source/sources/finnhub_source.py` | Finnhub API | 미국 주식 시세 (Fallback) |
+| `dual_source/sources/fmp_source.py` | FMP API | 미국 주식 재무 (Fallback) |
 | `ai_researcher.py` | Gemini 2.5 Flash | AI 분석 리포트 |
 
 ---
 
-## 9. 환경 변수
+## 9. 추가 데이터 소스 (선택적)
 
-| 변수명 | 용도 | 필수 |
+### 9.1 한국투자증권 (KIS) API
+
+| 항목 | 내용 |
+|------|------|
+| **파일** | `src/dual_source/sources/kis_source.py` |
+| **방식** | REST API (OAuth2 토큰 인증) |
+| **Base URL** | `https://openapi.koreainvestment.com:9443` |
+
+**인증 흐름:**
+```
+1. POST /oauth2/tokenP (토큰 발급)
+2. 토큰 캐싱 (24시간 유효)
+3. Bearer 토큰으로 API 호출
+4. 401 오류 시 자동 재발급
+```
+
+**수집 데이터:**
+- 외국인 순매수량 (`frgn_ntby_qty`)
+- 기관 순매수량 (`pgtr_ntby_qty`)
+- 거래량, 52주 고저가, PER, PBR
+
+**제한사항:**
+- 초당 약 20회 호출 제한
+- 앱키/시크릿 필요 (https://apiportal.koreainvestment.com)
+
+---
+
+### 9.2 Finnhub API
+
+| 항목 | 내용 |
+|------|------|
+| **파일** | `src/dual_source/sources/finnhub_source.py` |
+| **방식** | REST API |
+| **Base URL** | `https://finnhub.io/api/v1` |
+
+**엔드포인트:**
+- 시세: `/quote`
+- 캔들: `/stock/candle`
+- 뉴스: `/company-news`
+
+**제한사항:**
+- 무료 플랜: 60 calls/min
+- API 키 발급: https://finnhub.io
+
+---
+
+### 9.3 Financial Modeling Prep (FMP) API
+
+| 항목 | 내용 |
+|------|------|
+| **파일** | `src/dual_source/sources/fmp_source.py` |
+| **방식** | REST API |
+| **Base URL** | `https://financialmodelingprep.com/stable` |
+
+**엔드포인트:**
+- 시세: `/quote?symbol={symbol}`
+- 배치 시세: `/batch-quote?symbols={s1},{s2}`
+- 키 메트릭: `/key-metrics-ttm?symbol={symbol}`
+
+**수집 데이터:**
+- 거래량, 평균 거래량
+- 기관 보유 비율 (key-metrics)
+
+**제한사항:**
+- 무료 플랜: 250 calls/day
+- API 키 발급: https://financialmodelingprep.com
+
+---
+
+## 10. 환경 변수
+
+### 10.1 필수 환경 변수
+
+| 변수명 | 용도 | 설명 |
 |--------|------|------|
-| `GOOGLE_API_KEY_01` | Gemini API (기본) | O |
-| `GOOGLE_API_KEY_02` | Gemini API (Fallback 1) | X |
-| `GOOGLE_API_KEY_03` | Gemini API (Fallback 2) | X |
-| `KRX_API_KEY` | KRX OpenAPI | X |
-| `KRX_API_KEY_EXPIRY` | KRX API 만료일 | X |
-| `TELEGRAM_TOKEN` | 텔레그램 봇 | O |
-| `CHAT_ID` | 텔레그램 채팅 ID | O |
+| `TELEGRAM_TOKEN` | 텔레그램 봇 | 봇 API 토큰 |
+| `CHAT_ID` | 텔레그램 채팅 ID | 메시지 수신 채팅방 |
+| `GOOGLE_API_KEY_01` | Gemini API | AI 분석용 (기본) |
+
+### 10.2 선택적 환경 변수 (Fallback)
+
+| 변수명 | 용도 | 설명 |
+|--------|------|------|
+| `GOOGLE_API_KEY_02` | Gemini API | Fallback 1 |
+| `GOOGLE_API_KEY_03` | Gemini API | Fallback 2 |
+| `KRX_API_KEY` | KRX OpenAPI | 한국거래소 API |
+| `KRX_API_KEY_EXPIRY` | KRX API 만료일 | YYYY-MM-DD 형식 |
+
+### 10.3 추가 데이터 소스 (선택적)
+
+| 변수명 | 용도 | 발급처 |
+|--------|------|--------|
+| `KIS_APP_KEY` | 한국투자증권 앱키 | apiportal.koreainvestment.com |
+| `KIS_APP_SECRET` | 한국투자증권 시크릿 | apiportal.koreainvestment.com |
+| `FINNHUB_API_KEY` | Finnhub API | finnhub.io |
+| `FMP_API_KEY` | FMP API | financialmodelingprep.com |
+
+### 10.4 시스템 설정
+
+| 변수명 | 용도 | 기본값 |
+|--------|------|--------|
+| `USE_DUAL_SOURCE` | 듀얼 소스 활성화 | `true` |
+| `FRED_API_KEY` | FRED API | 매크로 데이터 |

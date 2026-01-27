@@ -102,6 +102,21 @@ class Settings:
         # 기본값: True (듀얼 소스 사용, 실패 시 기존 방식으로 fallback)
         use_dual_source_str = os.getenv('USE_DUAL_SOURCE', 'true').lower()
         self.use_dual_source = use_dual_source_str in ('true', '1', 'yes', 'on')
+
+        # === 추가 데이터 소스 API 키 (선택사항) ===
+
+        # 한국투자증권 (KIS) API (한국 주식 수급 데이터)
+        # https://apiportal.koreainvestment.com 에서 발급
+        self.kis_app_key = os.getenv('KIS_APP_KEY', None)
+        self.kis_app_secret = os.getenv('KIS_APP_SECRET', None)
+
+        # Finnhub API (미국 주식 Fallback)
+        # https://finnhub.io 에서 무료 발급 (60 calls/min)
+        self.finnhub_api_key = os.getenv('FINNHUB_API_KEY', None)
+
+        # Financial Modeling Prep (FMP) API (미국 주식 Fallback)
+        # https://financialmodelingprep.com 에서 발급 (무료: 250 calls/day)
+        self.fmp_api_key = os.getenv('FMP_API_KEY', None)
     
     def __repr__(self):
         return f"Settings(tickers={len(self.tickers)}개, schedule_times={len(self.schedule_times)}개)"

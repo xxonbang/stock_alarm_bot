@@ -29,13 +29,20 @@ jobs:
 
       - name: Run Stock Insight Bot
         env:
+          # 필수 환경 변수
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           GOOGLE_API_KEY_01: ${{ secrets.GOOGLE_API_KEY_01 }}
           GOOGLE_API_KEY_02: ${{ secrets.GOOGLE_API_KEY_02 }}
           GOOGLE_API_KEY_03: ${{ secrets.GOOGLE_API_KEY_03 }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          # 한국 주식 API
           KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
           KRX_API_KEY_EXPIRY: ${{ secrets.KRX_API_KEY_EXPIRY }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          # 미국 주식 Fallback API (선택적)
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
         run: |
           python src/main.py

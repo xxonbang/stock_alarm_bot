@@ -308,6 +308,38 @@ class TraditionalAPISource(DataSourceBase):
 
         return result
 
+    def _collect_with_finnhub(self, ticker_code: str) -> SupplyDemandData:
+        """Finnhub를 사용한 해외 주식 데이터 수집 (Fallback)"""
+        result: SupplyDemandData = {}
+
+        try:
+            from .finnhub_source import FinnhubSource
+            finnhub = FinnhubSource()
+            if finnhub._api_key:
+                result = finnhub._collect_sync(ticker_code)
+                if result:
+                    logger.debug(f"{ticker_code}: Finnhub 데이터 보완")
+        except Exception as e:
+            logger.debug(f"Finnhub fallback 실패: {e}")
+
+        return result
+
+    def _collect_with_fmp(self, ticker_code: str) -> SupplyDemandData:
+        """FMP를 사용한 해외 주식 데이터 수집 (Fallback)"""
+        result: SupplyDemandData = {}
+
+        try:
+            from .fmp_source import FMPSource
+            fmp = FMPSource()
+            if fmp._api_key:
+                result = fmp._collect_sync(ticker_code)
+                if result:
+                    logger.debug(f"{ticker_code}: FMP 데이터 보완")
+        except Exception as e:
+            logger.debug(f"FMP fallback 실패: {e}")
+
+        return result
+
     def _parse_numeric(self, value) -> float:
         """숫자 파싱"""
         try:
@@ -327,12 +359,28 @@ class TraditionalAPISource(DataSourceBase):
             pass
         return None
 
+    def _collect_with_kis(self, ticker_code: str) -> SupplyDemandData:
+        """KIS API를 사용한 한국 주식 데이터 수집 (선택적)"""
+        result: SupplyDemandData = {}
+
+        try:
+            from .kis_source import KISSource
+            kis = KISSource()
+            if kis._token_manager.is_configured():
+                result = kis._collect_sync(ticker_code)
+                if result:
+                    logger.debug(f"{ticker_code}: KIS API 데이터 보완")
+        except Exception as e:
+            logger.debug(f"KIS API fallback 실패: {e}")
+
+        return result
+
     def _collect_korean_stock(self, ticker_code: str) -> SupplyDemandData:
-        """한국 주식 데이터 수집 (Fallback 체인)"""
+        """한국 주식 데이터 수집 (Fallback 체인: pykrx → KRX API → KIS → 네이버)"""
         code = ticker_code.replace('.KS', '').replace('.KQ', '')
         result: SupplyDemandData = {}
 
-        # 1. pykrx 시도
+        # 1. pykrx 시도 (Primary)
         pykrx_data = self._collect_with_pykrx(code)
         if pykrx_data.get('foreign_net') is not None:
             result.update(pykrx_data)
@@ -345,16 +393,51 @@ class TraditionalAPISource(DataSourceBase):
                 result.update(krx_data)
                 logger.debug(f"{ticker_code}: KRX API 성공")
 
-        # 3. 네이버 크롤링 (최종 폴백)
+        # 3. KIS API 시도 (추가 Fallback)
+        if result.get('foreign_net') is None:
+            kis_data = self._collect_with_kis(ticker_code)
+            if kis_data.get('foreign_net') is not None or kis_data.get('foreign_net_1d') is not None:
+                result.update(kis_data)
+                logger.debug(f"{ticker_code}: KIS API 성공")
+
+        # 4. 네이버 크롤링 (최종 폴백)
         if result.get('foreign_net') is None:
             naver_data = self._collect_from_naver(code)
             result.update(naver_data)
             logger.debug(f"{ticker_code}: 네이버 크롤링 사용")
 
-        # 4. ETF 괴리율
+        # 5. ETF 괴리율
         etf_data = self._collect_etf_data_krx(code)
         if etf_data.get('disparity_rate') is not None:
             result['disparity_rate'] = etf_data['disparity_rate']
+
+        return result
+
+    def _collect_overseas_stock(self, ticker_code: str) -> SupplyDemandData:
+        """해외 주식 데이터 수집 (Fallback 체인: yfinance → Finnhub → FMP)"""
+        result: SupplyDemandData = {}
+
+        # 1. yfinance 시도 (Primary)
+        yfinance_data = self._collect_with_yfinance(ticker_code)
+        if yfinance_data:
+            result.update(yfinance_data)
+            logger.debug(f"{ticker_code}: yfinance 성공")
+
+        # 2. 데이터 보완 (institutional_net 없으면 Finnhub 시도)
+        if result.get('institutional_net') is None:
+            finnhub_data = self._collect_with_finnhub(ticker_code)
+            if finnhub_data:
+                for k, v in finnhub_data.items():
+                    if result.get(k) is None:
+                        result[k] = v
+
+        # 3. 추가 보완 (FMP 시도)
+        if result.get('institutional_net') is None or result.get('total_volume') is None:
+            fmp_data = self._collect_with_fmp(ticker_code)
+            if fmp_data:
+                for k, v in fmp_data.items():
+                    if result.get(k) is None:
+                        result[k] = v
 
         return result
 
@@ -363,4 +446,4 @@ class TraditionalAPISource(DataSourceBase):
         if self._is_korean_stock(ticker_code):
             return self._collect_korean_stock(ticker_code)
         else:
-            return self._collect_with_yfinance(ticker_code)
+            return self._collect_overseas_stock(ticker_code)
