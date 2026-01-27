@@ -356,6 +356,21 @@ class TraditionalAPISource(DataSourceBase):
 
         return result
 
+    def _collect_with_yahoo_chart(self, ticker_code: str) -> SupplyDemandData:
+        """Yahoo Chart API 직접 호출 (crumb 불필요, 최우선)"""
+        result: SupplyDemandData = {}
+
+        try:
+            from .yahoo_chart_source import YahooChartSource
+            yahoo = YahooChartSource()
+            result = yahoo._collect_sync(ticker_code)
+            if result:
+                logger.debug(f"{ticker_code}: Yahoo Chart API 성공 (1순위)")
+        except Exception as e:
+            logger.debug(f"Yahoo Chart API 실패: {e}")
+
+        return result
+
     def _parse_numeric(self, value) -> float:
         """숫자 파싱"""
         try:
@@ -430,23 +445,33 @@ class TraditionalAPISource(DataSourceBase):
         return result
 
     def _collect_overseas_stock(self, ticker_code: str) -> SupplyDemandData:
-        """해외 주식 데이터 수집 (Fallback 체인: yfinance → Twelve Data → Finnhub → FMP)
+        """해외 주식 데이터 수집 (최적화된 Fallback 체인)
 
         우선순위 기준:
-        1. yfinance: 무료/무제한, 기관보유 제공, 단 비공식 API
-        2. Twelve Data: 800 calls/day, 안정적
-        3. Finnhub: 60 calls/min, 실시간 지원
-        4. FMP: 250 calls/day, 기관보유 제공 (호출 아껴 사용)
+        1. Yahoo Chart API: crumb 불필요, 빠름 (~250ms), 안정적
+        2. yfinance: 기관보유 데이터 전용 (crumb 필요하지만 필수 데이터)
+        3. Twelve Data: 800 calls/day, 안정적 백업
+        4. Finnhub: 60 calls/min
+        5. FMP: 250 calls/day, 기관보유 백업
         """
         result: SupplyDemandData = {}
 
-        # 1. yfinance 시도 (Primary - 무료, 기관보유 제공)
-        yfinance_data = self._collect_with_yfinance(ticker_code)
-        if yfinance_data:
-            result.update(yfinance_data)
-            logger.debug(f"{ticker_code}: yfinance 성공")
+        # 1. Yahoo Chart API (Primary - crumb 불필요, 빠름, 안정적)
+        yahoo_data = self._collect_with_yahoo_chart(ticker_code)
+        if yahoo_data:
+            result.update(yahoo_data)
 
-        # 2. Twelve Data 시도 (800/day로 넉넉)
+        # 2. yfinance (기관보유 데이터 전용 - Chart API 미제공)
+        if result.get('institutional_net') is None:
+            yfinance_data = self._collect_with_yfinance(ticker_code)
+            if yfinance_data:
+                for k, v in yfinance_data.items():
+                    if result.get(k) is None:
+                        result[k] = v
+                if yfinance_data.get('institutional_net') is not None:
+                    logger.debug(f"{ticker_code}: yfinance 기관보유 데이터 획득")
+
+        # 3. Twelve Data (거래량 백업 - 800/day)
         if result.get('total_volume_1d') is None:
             td_data = self._collect_with_twelvedata(ticker_code)
             if td_data:
@@ -454,7 +479,7 @@ class TraditionalAPISource(DataSourceBase):
                     if result.get(k) is None:
                         result[k] = v
 
-        # 3. Finnhub 시도 (60/min, 안정적)
+        # 4. Finnhub (추가 백업 - 60/min)
         if result.get('total_volume_1d') is None:
             finnhub_data = self._collect_with_finnhub(ticker_code)
             if finnhub_data:
@@ -462,7 +487,7 @@ class TraditionalAPISource(DataSourceBase):
                     if result.get(k) is None:
                         result[k] = v
 
-        # 4. FMP 시도 (기관보유 전용 - 250/day 아껴 사용)
+        # 5. FMP (기관보유 최종 백업 - 250/day)
         if result.get('institutional_net') is None:
             fmp_data = self._collect_with_fmp(ticker_code)
             if fmp_data:

@@ -15,6 +15,7 @@ from .kis_source import KISSource, get_kis_token_manager
 from .finnhub_source import FinnhubSource
 from .fmp_source import FMPSource
 from .twelvedata_source import TwelveDataSource
+from .yahoo_chart_source import YahooChartSource
 
 __all__ = [
     'DataSourceBase',
@@ -24,5 +25,6 @@ __all__ = [
     'FinnhubSource',
     'FMPSource',
     'TwelveDataSource',
+    'YahooChartSource',
     'get_kis_token_manager',
 ]
