@@ -26,7 +26,7 @@ from typing import List, Dict, Optional
 import time
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import os
 import re
 import warnings
@@ -1924,7 +1924,6 @@ def get_supply_demand_pykrx(ticker_code: str) -> Dict[str, Optional[float]]:
 
     try:
         from pykrx import stock
-        from datetime import datetime, timedelta
 
         # .KS, .KQ 제거하여 순수 코드만 추출
         code = ticker_code.replace('.KS', '').replace('.KQ', '')
@@ -2005,8 +2004,6 @@ def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optio
     code = ticker_code.replace('.KS', '').replace('.KQ', '')
     
     try:
-        from datetime import datetime, timedelta
-        
         # 최근 3거래일 데이터 수집 (1일치와 3일치 모두 수집)
         foreign_sum = 0.0
         institutional_sum = 0.0
@@ -2120,8 +2117,7 @@ def get_kr_stock_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optio
                         if not _krx_api_expiry_checked:
                             try:
                                 from config.settings import settings
-                                from datetime import date
-                                
+
                                 # 유효기간 정보가 있으면 체크
                                 if settings.krx_api_key_expiry:
                                     today = date.today()
@@ -2203,8 +2199,6 @@ def get_etf_data_krx_api(ticker_code: str, api_key: str) -> Dict[str, Optional[f
     code = ticker_code.replace('.KS', '').replace('.KQ', '')
     
     try:
-        from datetime import date, timedelta
-        
         # 최근 거래일부터 역순으로 시도 (최대 5일)
         today = date.today()
         max_attempts = 5
@@ -2338,8 +2332,7 @@ def get_krx_api_status() -> Dict[str, any]:
     """
     try:
         from config.settings import settings
-        from datetime import date
-        
+
         if not settings.krx_api_key:
             return {'expired': False, 'expiry_date': None, 'days_until_expiry': None}
         

@@ -38,11 +38,9 @@ class AIResearcher:
 
             key_label = "기본(01)" if key_number == 1 else f"Fallback({key_number:02d})"
             logger.info(f"✅ Google GenAI v2 클라이언트 초기화 완료 ({key_label} 키): {self.model_name}")
-            print(f"✅ Google GenAI v2 클라이언트 초기화 완료 ({key_label} 키): {self.model_name}")
         except Exception as e:
             error_msg = f"Google GenAI 클라이언트 초기화 실패: {str(e)[:200]}"
-            logger.error(error_msg)
-            print(f"❌ {error_msg}")
+            logger.error(f"❌ {error_msg}")
             raise RuntimeError(error_msg)
     
     def _switch_to_fallback(self):
@@ -200,13 +198,11 @@ class AIResearcher:
                 if is_quota_exceeded:
                     # 다음 fallback 키로 전환 시도
                     if self._switch_to_fallback():
-                        logger.info(f"Fallback API 키 #{self._key_manager.current_key_number:02d}로 재시도...")
-                        print(f"🔄 Fallback API 키 #{self._key_manager.current_key_number:02d}로 재시도...")
+                        logger.info(f"🔄 Fallback API 키 #{self._key_manager.current_key_number:02d}로 재시도...")
                         continue
                     # 모든 키 소진 시 즉시 실패 처리
                     total_keys = self._key_manager.total_keys
                     error_msg = f"❌ API 할당량 초과 (Quota Exceeded): 모든 API 키({total_keys}개)의 할당량을 모두 사용했습니다. 다음 청구 주기까지 대기하거나 유료 플랜으로 업그레이드하세요."
-                    print(error_msg)
                     logger.error(error_msg)
                     logger.error(f"에러 상세: {error_str}")
                     return "API 할당량 초과(429 Error)", {}
@@ -224,8 +220,6 @@ class AIResearcher:
                     else:
                         error_type = "서버 과부하 (503)"
 
-                    print(f"⚠️ {error_type} 에러 발생 (시도 {attempt + 1}/{max_retries})")
-                    print(f"⏳ {wait_time}초 대기 후 재시도합니다...")
                     logger.warning(f"⚠️ {error_type} 에러 발생 (시도 {attempt + 1}/{max_retries}): {error_str[:200]}")
                     logger.info(f"⏳ {wait_time}초 대기 후 재시도합니다...")
                     time.sleep(wait_time)
@@ -236,9 +230,7 @@ class AIResearcher:
                     # 10초 -> 30초 -> 60초 -> 120초 -> 180초
                     wait_times = [10, 30, 60, 120, 180]
                     wait_time = wait_times[min(attempt, len(wait_times) - 1)]
-                    
-                    print(f"⚠️ Rate Limit 에러 발생 (시도 {attempt + 1}/{max_retries})")
-                    print(f"⏳ Exponential Backoff: {wait_time}초 대기 후 재시도합니다...")
+
                     logger.warning(f"⚠️ Rate Limit 에러 발생 (시도 {attempt + 1}/{max_retries})")
                     logger.info(f"⏳ Exponential Backoff: {wait_time}초 대기 후 재시도합니다...")
                     time.sleep(wait_time)

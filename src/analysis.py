@@ -10,10 +10,9 @@ yfinance를 사용하여 주가 데이터 수집 및 기간별 수익률 계산
 - 모든 계산은 pandas/numpy로만 처리
 """
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 import logging
-from datetime import timezone
 import pandas as pd
 import numpy as np
 import time
@@ -1307,8 +1306,7 @@ def get_tradingview_technical_summary(tickers: List[str]) -> str:
     Returns:
         포맷팅된 기술적 분석 텍스트
     """
-    logger.info("=== TradingView 기술적 분석 수집 시작 ===")
-    print("=== TradingView 기술적 분석 수집 시작 ===")
+    logger.info("=== 기술적 분석 수집 시작 ===")
     
     signals = []
     
@@ -1384,13 +1382,11 @@ def get_tradingview_technical_summary(tickers: List[str]) -> str:
     
     if signals:
         result = "[TECHNICAL SIGNALS (Local Calculation)]\n" + "\n".join(signals)
-        logger.info(f"기술적 분석 수집 완료: {len(signals)}개")
-        print(f"✅ 기술적 분석 수집 완료: {len(signals)}개")
+        logger.info(f"✅ 기술적 분석 수집 완료: {len(signals)}개")
         return result
     else:
         result = "[TECHNICAL SIGNALS (Local Calculation)]\n데이터 수집 실패"
-        logger.warning("기술적 분석: 데이터 없음")
-        print("⚠️ 기술적 분석: 데이터 없음")
+        logger.warning("⚠️ 기술적 분석: 데이터 없음")
         return result
 
 
