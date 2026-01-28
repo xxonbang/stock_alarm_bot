@@ -3,6 +3,7 @@
 
 실시간 시세, 일별 시세, 수급 데이터 제공
 - 토큰 기반 인증 (24시간 유효)
+- 파일 기반 토큰 캐싱 (1일 1회 발급 제한 준수)
 - 401 오류 시 자동 재발급
 
 장점:
@@ -14,10 +15,17 @@
 - 토큰 관리 필요 (24시간 만료)
 - 초당 호출 제한 (약 20회/초)
 - 앱키/시크릿 필요
+
+주의:
+- 토큰 발급은 1일 1회 제한이므로 파일 캐싱 필수
+- 토큰 캐시 파일: .cache/kis_token.json
 """
+import json
 import logging
+import os
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any
 
 import requests
@@ -32,11 +40,20 @@ _session = requests.Session()
 
 
 class KISTokenManager:
-    """KIS API 토큰 관리자 (싱글톤)"""
+    """
+    KIS API 토큰 관리자 (싱글톤 + 파일 캐싱)
+
+    중요: 한국투자증권 API는 토큰 발급이 1일 1회로 제한됩니다.
+    프로그램 재시작 시에도 기존 토큰을 재사용하기 위해 파일에 캐싱합니다.
+    """
 
     _instance: Optional['KISTokenManager'] = None
 
     BASE_URL = "https://openapi.koreainvestment.com:9443"
+
+    # 토큰 캐시 파일 경로 (프로젝트 루트/.cache/kis_token.json)
+    CACHE_DIR = ".cache"
+    CACHE_FILE = "kis_token.json"
 
     def __new__(cls):
         if cls._instance is None:
@@ -52,30 +69,160 @@ class KISTokenManager:
         self._token_expires_at: float = 0
         self._app_key: Optional[str] = None
         self._app_secret: Optional[str] = None
+        self._cache_file_path: Optional[Path] = None
         self._initialized = True
 
+    def _get_cache_file_path(self) -> Path:
+        """토큰 캐시 파일 경로 반환 (프로젝트 루트 기준)"""
+        if self._cache_file_path:
+            return self._cache_file_path
+
+        # 프로젝트 루트 찾기 (src/dual_source/sources/ 에서 3단계 상위)
+        current_file = Path(__file__).resolve()
+        project_root = current_file.parent.parent.parent.parent
+
+        cache_dir = project_root / self.CACHE_DIR
+        cache_dir.mkdir(exist_ok=True)
+
+        self._cache_file_path = cache_dir / self.CACHE_FILE
+        return self._cache_file_path
+
+    def _load_token_from_file(self) -> bool:
+        """
+        파일에서 토큰 로드
+
+        Returns:
+            True: 유효한 토큰 로드 성공
+            False: 파일 없음 또는 토큰 만료
+        """
+        try:
+            cache_file = self._get_cache_file_path()
+            if not cache_file.exists():
+                logger.debug("KIS 토큰 캐시 파일 없음")
+                return False
+
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            token = data.get('access_token')
+            expires_at = data.get('expires_at', 0)
+            cached_app_key = data.get('app_key_hash')  # 앱키 해시로 검증
+
+            # 앱키가 변경되었는지 확인 (다른 계정으로 전환 시)
+            current_key_hash = self._hash_app_key()
+            if cached_app_key and cached_app_key != current_key_hash:
+                logger.info("🔄 KIS 앱키 변경 감지, 기존 토큰 무효화")
+                return False
+
+            # 토큰 만료 확인 (5분 여유)
+            if not token or time.time() >= (expires_at - 300):
+                logger.info("⏰ KIS 캐시 토큰 만료됨")
+                return False
+
+            # 유효한 토큰 로드
+            self._access_token = token
+            self._token_expires_at = expires_at
+
+            remaining = int((expires_at - time.time()) / 3600)
+            logger.info(f"✅ KIS 캐시 토큰 로드 성공 (남은 유효시간: ~{remaining}시간)")
+            return True
+
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"KIS 토큰 캐시 파일 손상: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"KIS 토큰 캐시 로드 오류: {e}")
+            return False
+
+    def _save_token_to_file(self) -> bool:
+        """
+        토큰을 파일에 저장
+
+        Returns:
+            True: 저장 성공
+            False: 저장 실패
+        """
+        if not self._access_token:
+            return False
+
+        try:
+            cache_file = self._get_cache_file_path()
+
+            data = {
+                'access_token': self._access_token,
+                'expires_at': self._token_expires_at,
+                'app_key_hash': self._hash_app_key(),
+                'created_at': datetime.now().isoformat(),
+            }
+
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            logger.debug(f"KIS 토큰 캐시 저장: {cache_file}")
+            return True
+
+        except Exception as e:
+            logger.warning(f"KIS 토큰 캐시 저장 실패: {e}")
+            return False
+
+    def _delete_cache_file(self):
+        """캐시 파일 삭제"""
+        try:
+            cache_file = self._get_cache_file_path()
+            if cache_file.exists():
+                cache_file.unlink()
+                logger.debug("KIS 토큰 캐시 파일 삭제됨")
+        except Exception as e:
+            logger.warning(f"KIS 토큰 캐시 삭제 실패: {e}")
+
+    def _hash_app_key(self) -> str:
+        """앱키 해시 (마지막 4자리만 저장하여 변경 감지)"""
+        if not self._app_key:
+            return ""
+        return self._app_key[-4:] if len(self._app_key) >= 4 else self._app_key
+
     def configure(self, app_key: str, app_secret: str):
-        """API 키 설정"""
+        """API 키 설정 및 캐시 토큰 로드 시도"""
         self._app_key = app_key
         self._app_secret = app_secret
+
+        # 설정 후 캐시에서 토큰 로드 시도
+        self._load_token_from_file()
 
     def is_configured(self) -> bool:
         """API 키가 설정되었는지 확인"""
         return bool(self._app_key and self._app_secret)
 
     def get_token(self) -> Optional[str]:
-        """유효한 액세스 토큰 반환 (필요시 발급/갱신)"""
+        """
+        유효한 액세스 토큰 반환 (파일 캐싱 우선)
+
+        1. 메모리에 유효한 토큰이 있으면 반환
+        2. 파일에서 유효한 토큰 로드 시도
+        3. 모두 실패 시 새로 발급 (1일 1회 제한 주의)
+        """
         if not self.is_configured():
             return None
 
-        # 토큰 유효성 확인 (만료 5분 전 갱신)
+        # 1. 메모리 토큰 확인 (만료 5분 전 갱신)
         if self._access_token and time.time() < (self._token_expires_at - 300):
             return self._access_token
 
+        # 2. 파일에서 토큰 로드 시도
+        if self._load_token_from_file():
+            return self._access_token
+
+        # 3. 새 토큰 발급 (주의: 1일 1회 제한)
+        logger.info("🔄 KIS 토큰 신규 발급 시도 (1일 1회 제한 주의)")
         return self._refresh_token()
 
     def _refresh_token(self) -> Optional[str]:
-        """토큰 발급/갱신"""
+        """
+        토큰 발급/갱신
+
+        주의: 한국투자증권 API는 1일 1회 토큰 발급 제한이 있습니다.
+        발급 성공 시 파일에 캐싱하여 재사용합니다.
+        """
         try:
             url = f"{self.BASE_URL}/oauth2/tokenP"
             payload = {
@@ -94,6 +241,10 @@ class KISTokenManager:
                 self._token_expires_at = time.time() + expires_in
 
                 logger.info(f"✅ KIS 토큰 발급 성공 (유효기간: {expires_in // 3600}시간)")
+
+                # 파일에 캐싱 (다음 실행 시 재사용)
+                self._save_token_to_file()
+
                 return self._access_token
             else:
                 logger.error(f"❌ KIS 토큰 발급 실패: {response.status_code} - {response.text}")
@@ -107,7 +258,8 @@ class KISTokenManager:
         """토큰 무효화 (401 오류 시 호출)"""
         self._access_token = None
         self._token_expires_at = 0
-        logger.info("🔄 KIS 토큰 무효화됨 (재발급 필요)")
+        self._delete_cache_file()
+        logger.info("🔄 KIS 토큰 무효화됨 (캐시 삭제, 재발급 필요)")
 
     @property
     def app_key(self) -> Optional[str]:

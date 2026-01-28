@@ -27,6 +27,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Cache KIS API Token
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: kis-token-${{ runner.os }}-${{ github.ref_name }}
+          restore-keys: |
+            kis-token-${{ runner.os }}-
+
       - name: Run Stock Insight Bot
         env:
           # 필수 환경 변수
