@@ -2467,11 +2467,17 @@ def get_kr_stock_data(ticker_code: str) -> Dict[str, Optional[float]]:
         # KRX API에서 이미 데이터를 가져온 경우 스킵 (None이 아닌 경우만)
         # 0.0은 유효한 데이터로 간주 (실제로 외/기 거래가 없는 경우)
         # None만 fallback 대상으로 처리
+        # 단, ETF의 경우 pykrx/KRX API가 기관/외국인 데이터를 제공하지 않으므로
+        # 네이버 크롤링을 강제로 시도
         krx_has_data = (
             result.get('foreign_net') is not None or
             result.get('institutional_net') is not None
         )
-        if not krx_has_data:
+        # ETF는 pykrx/KRX API에서 기관/외국인 데이터를 제공하지 않으므로 네이버 크롤링 필요
+        need_naver_crawling = not krx_has_data or is_etf
+        if need_naver_crawling:
+            if is_etf:
+                logger.debug(f"{ticker_code}: ETF 감지됨, 네이버 크롤링으로 기관/외국인 데이터 수집")
             try:
                 url = f"https://finance.naver.com/item/frgn.naver?code={code}"
                 logger.debug(f"수급 데이터 수집 중: {url}")

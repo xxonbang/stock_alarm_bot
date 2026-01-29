@@ -407,35 +407,69 @@ class TraditionalAPISource(DataSourceBase):
         return result
 
     def _collect_korean_stock(self, ticker_code: str) -> SupplyDemandData:
-        """한국 주식 데이터 수집 (Fallback 체인: KIS → pykrx → KRX API → 네이버)"""
+        """한국 주식 데이터 수집 (Fallback 체인: KIS → pykrx → KRX API → 네이버)
+
+        주의: ETF의 경우 KIS API가 0을 반환하는 경우가 많으므로,
+        0.0 값도 의심스러운 값으로 취급하여 네이버 크롤링으로 교차 검증합니다.
+        """
         code = ticker_code.replace('.KS', '').replace('.KQ', '')
         result: SupplyDemandData = {}
 
         # 1. KIS API 시도 (Primary - 공식 증권사 API)
         kis_data = self._collect_with_kis(ticker_code)
-        if kis_data.get('foreign_net') is not None or kis_data.get('foreign_net_1d') is not None:
+        kis_has_meaningful_data = (
+            kis_data.get('foreign_net') is not None and kis_data.get('foreign_net') != 0 or
+            kis_data.get('foreign_net_1d') is not None and kis_data.get('foreign_net_1d') != 0 or
+            kis_data.get('institutional_net') is not None and kis_data.get('institutional_net') != 0 or
+            kis_data.get('institutional_net_1d') is not None and kis_data.get('institutional_net_1d') != 0
+        )
+        if kis_has_meaningful_data:
             result.update(kis_data)
-            logger.debug(f"{ticker_code}: KIS API 성공 (1순위)")
+            logger.debug(f"{ticker_code}: KIS API 성공 (유의미한 데이터)")
 
         # 2. pykrx 시도 (Fallback 1 - 무료, 안정적)
-        if result.get('foreign_net') is None:
+        # 주의: pykrx는 ETF에 대해 빈 데이터를 반환하므로 fallback으로 진행
+        if result.get('foreign_net') is None or result.get('foreign_net') == 0:
             pykrx_data = self._collect_with_pykrx(code)
-            if pykrx_data.get('foreign_net') is not None:
+            pykrx_has_data = (
+                pykrx_data.get('foreign_net') is not None and pykrx_data.get('foreign_net') != 0 or
+                pykrx_data.get('institutional_net') is not None and pykrx_data.get('institutional_net') != 0
+            )
+            if pykrx_has_data:
                 result.update(pykrx_data)
                 logger.debug(f"{ticker_code}: pykrx 성공")
 
         # 3. KRX API 시도 (Fallback 2)
-        if result.get('foreign_net') is None:
+        if result.get('foreign_net') is None or result.get('foreign_net') == 0:
             krx_data = self._collect_with_krx_api(code)
-            if krx_data.get('foreign_net') is not None:
+            krx_has_data = (
+                krx_data.get('foreign_net') is not None and krx_data.get('foreign_net') != 0 or
+                krx_data.get('institutional_net') is not None and krx_data.get('institutional_net') != 0
+            )
+            if krx_has_data:
                 result.update(krx_data)
                 logger.debug(f"{ticker_code}: KRX API 성공")
 
-        # 4. 네이버 크롤링 (최종 폴백)
-        if result.get('foreign_net') is None:
+        # 4. 네이버 크롤링 (최종 폴백 + 교차 검증)
+        # ETF의 경우 다른 API가 0을 반환해도 네이버에서 실제 데이터 수집 가능
+        needs_naver_fallback = (
+            result.get('foreign_net') is None or
+            result.get('foreign_net') == 0 or
+            result.get('institutional_net') is None or
+            result.get('institutional_net') == 0
+        )
+        if needs_naver_fallback:
             naver_data = self._collect_from_naver(code)
-            result.update(naver_data)
-            logger.debug(f"{ticker_code}: 네이버 크롤링 사용")
+            naver_has_data = (
+                naver_data.get('foreign_net') is not None or
+                naver_data.get('institutional_net') is not None
+            )
+            if naver_has_data:
+                # 네이버 데이터로 업데이트 (기존 0 값 덮어쓰기)
+                for key in ['foreign_net', 'institutional_net', 'foreign_net_1d', 'institutional_net_1d']:
+                    if naver_data.get(key) is not None:
+                        result[key] = naver_data[key]
+                logger.debug(f"{ticker_code}: 네이버 크롤링으로 데이터 보완/대체")
 
         # 5. ETF 괴리율
         etf_data = self._collect_etf_data_krx(code)
