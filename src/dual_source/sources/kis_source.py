@@ -4,7 +4,7 @@
 실시간 시세, 일별 시세, 수급 데이터 제공
 - 토큰 기반 인증 (24시간 유효)
 - 파일 기반 토큰 캐싱 (1일 1회 발급 제한 준수)
-- 401 오류 시 자동 재발급
+- 토큰 만료 시 자동 재발급 (HTTP 200 + rt_cd:"1" 또는 HTTP 401)
 
 장점:
 - 공식 증권사 API로 데이터 신뢰성 높음
@@ -255,7 +255,7 @@ class KISTokenManager:
             return None
 
     def invalidate(self):
-        """토큰 무효화 (401 오류 시 호출)"""
+        """토큰 무효화 (토큰 만료 감지 시 호출)"""
         self._access_token = None
         self._token_expires_at = 0
         self._delete_cache_file()
@@ -360,8 +360,16 @@ class KISSource(DataSourceBase):
                     if data.get('rt_cd') == '0':
                         return data
                     else:
-                        logger.warning(f"KIS API 응답 오류: {data.get('msg1')}")
-                        return None
+                        # KIS API는 토큰 만료 시 HTTP 200 + rt_cd: "1" 반환
+                        # 예: {"rt_cd": "1", "msg1": "기간이 만료된 token 입니다"}
+                        msg = data.get('msg1', '')
+                        if '만료' in msg or 'token' in msg.lower() or '토큰' in msg:
+                            logger.warning(f"🔄 KIS 토큰 만료 감지 (rt_cd=1): {msg}")
+                            self._token_manager.invalidate()
+                            continue  # 토큰 재발급 후 재시도
+                        else:
+                            logger.warning(f"KIS API 응답 오류: {msg}")
+                            return None
 
                 elif response.status_code == 401:
                     # 토큰 만료 → 재발급 후 재시도
