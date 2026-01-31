@@ -584,7 +584,9 @@ class AgenticScreenshotSource(DataSourceBase):
         self, screenshots: dict[str, bytes]
     ) -> dict[str, SupplyDemandData]:
         """
-        여러 스크린샷을 한 번의 Vision API 호출로 처리 (API 호출 1회)
+        여러 스크린샷을 한 번의 Vision API 호출로 처리 (API 호출 정확히 1회)
+
+        한국 주식과 해외 주식을 모두 하나의 API 호출로 처리합니다.
 
         Args:
             screenshots: {ticker_code: screenshot_bytes} 딕셔너리
@@ -602,21 +604,188 @@ class AgenticScreenshotSource(DataSourceBase):
             from config.settings import get_api_key_manager
             self._key_manager = get_api_key_manager()
 
-        # 한국 주식과 해외 주식 분리
-        kr_screenshots = {k: v for k, v in screenshots.items() if self._is_korean_stock(k)}
-        us_screenshots = {k: v for k, v in screenshots.items() if not self._is_korean_stock(k)}
+        # 한국 주식과 해외 주식 분리 (프롬프트 구성용)
+        kr_tickers = [k for k in screenshots.keys() if self._is_korean_stock(k)]
+        us_tickers = [k for k in screenshots.keys() if not self._is_korean_stock(k)]
+        all_tickers = kr_tickers + us_tickers  # 순서 유지: 한국 → 해외
 
+        if not all_tickers:
+            return {}
+
+        # 통합 프롬프트 생성 (한국 + 해외)
+        prompt = self._build_unified_batch_prompt(kr_tickers, us_tickers)
+
+        # 이미지 순서: 한국 주식 먼저, 해외 주식 나중
         results: dict[str, SupplyDemandData] = {}
+        max_attempts = self._key_manager.total_keys
+        last_error = None
 
-        # 한국 주식 배치 처리
-        if kr_screenshots:
-            kr_results = self._extract_batch_korean(kr_screenshots)
-            results.update(kr_results)
+        for attempt in range(max_attempts):
+            try:
+                self._init_gemini_client()
 
-        # 해외 주식 배치 처리
-        if us_screenshots:
-            us_results = self._extract_batch_us(us_screenshots)
-            results.update(us_results)
+                # 요청 내용 구성: 이미지들 (한국→해외 순서) + 프롬프트
+                contents = []
+                for ticker in all_tickers:
+                    contents.append(types.Part.from_bytes(
+                        data=screenshots[ticker],
+                        mime_type='image/png'
+                    ))
+                contents.append(prompt)
+
+                response = self._client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=65536,
+                    )
+                )
+
+                response_text = response.text if hasattr(response, 'text') else ""
+                logger.info(f"🎯 배치 Vision API 1회 호출 완료 (한국 {len(kr_tickers)}개 + 해외 {len(us_tickers)}개 = 총 {len(all_tickers)}개)")
+                logger.debug(f"배치 Vision 응답: {response_text[:1500]}")
+
+                # 통합 응답 파싱
+                parsed = self._parse_unified_batch_response(response_text, kr_tickers, us_tickers)
+
+                # 결과 변환
+                for ticker, data in parsed.items():
+                    result: SupplyDemandData = {}
+
+                    if self._is_korean_stock(ticker):
+                        # 한국 주식: 주 → 만주 변환
+                        if data.get('foreign_net_1d') is not None:
+                            result['foreign_net_1d'] = round(float(data['foreign_net_1d']) / 10000, 2)
+                        if data.get('foreign_net_3d') is not None:
+                            result['foreign_net'] = round(float(data['foreign_net_3d']) / 10000, 2)
+                        if data.get('institutional_net_1d') is not None:
+                            result['institutional_net_1d'] = round(float(data['institutional_net_1d']) / 10000, 2)
+                        if data.get('institutional_net_3d') is not None:
+                            result['institutional_net'] = round(float(data['institutional_net_3d']) / 10000, 2)
+                        if data.get('disparity_rate') is not None:
+                            result['disparity_rate'] = float(data['disparity_rate'])
+                    else:
+                        # 해외 주식
+                        if data.get('institutional_held') is not None:
+                            result['institutional_net'] = float(data['institutional_held'])
+
+                    results[ticker] = result
+
+                return results
+
+            except Exception as e:
+                error_str = str(e)
+                last_error = e
+
+                if 'quota' in error_str.lower() or '429' in error_str:
+                    logger.warning(f"⚠️ 배치 Vision API 할당량 초과")
+                    if self._key_manager.mark_key_exhausted():
+                        self._client = None
+                        continue
+                    else:
+                        break
+                else:
+                    logger.error(f"배치 Vision API 에러: {error_str}")
+                    break
+
+        logger.error(f"배치 Vision API 호출 실패: {last_error}")
+        return results
+
+    def _build_unified_batch_prompt(self, kr_tickers: list, us_tickers: list) -> str:
+        """한국+해외 통합 배치 프롬프트 생성"""
+        prompt_parts = []
+
+        prompt_parts.append("아래는 여러 종목의 금융 스크린샷입니다. 이미지 순서대로 데이터를 추출해주세요.\n")
+
+        # 이미지 순서 설명
+        idx = 1
+        if kr_tickers:
+            prompt_parts.append("=== 한국 주식 (네이버 금융) ===")
+            for t in kr_tickers:
+                code = t.replace('.KS', '').replace('.KQ', '')
+                prompt_parts.append(f"{idx}. {code} ({t})")
+                idx += 1
+            prompt_parts.append("")
+
+        if us_tickers:
+            prompt_parts.append("=== 해외 주식 (Yahoo Finance) ===")
+            for t in us_tickers:
+                prompt_parts.append(f"{idx}. {t}")
+                idx += 1
+            prompt_parts.append("")
+
+        # 추출 지시사항
+        prompt_parts.append("""각 종목에서 추출할 데이터:
+
+[한국 주식]
+- foreign_net_1d: 외국인 순매매량 (최근 1거래일, 주 단위)
+- foreign_net_3d: 외국인 순매매량 (최근 3거래일 합계, 주 단위)
+- institutional_net_1d: 기관 순매매량 (최근 1거래일, 주 단위)
+- institutional_net_3d: 기관 순매매량 (최근 3거래일 합계, 주 단위)
+- disparity_rate: ETF 괴리율 (%, 해당 시)
+
+[해외 주식]
+- institutional_held: 기관 보유 비중 (%)
+
+반드시 아래 JSON 배열 형식으로만 응답하세요:
+[
+  {"ticker": "005930", "type": "kr", "foreign_net_1d": 숫자, "foreign_net_3d": 숫자, "institutional_net_1d": 숫자, "institutional_net_3d": 숫자, "disparity_rate": 숫자또는null},
+  {"ticker": "AAPL", "type": "us", "institutional_held": 숫자또는null}
+]
+
+주의:
+- 숫자에서 쉼표 제거
+- 매도는 음수(-) 표시
+- 없는 데이터는 null
+- 이미지 순서와 응답 순서 일치
+""")
+
+        return "\n".join(prompt_parts)
+
+    def _parse_unified_batch_response(
+        self, response_text: str, kr_tickers: list, us_tickers: list
+    ) -> dict[str, dict]:
+        """통합 배치 응답 파싱"""
+        results = {}
+        all_tickers = kr_tickers + us_tickers
+
+        if not response_text:
+            return results
+
+        json_str = response_text.strip()
+
+        # 마크다운 코드 블록 처리
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', json_str)
+        if json_match:
+            json_str = json_match.group(1).strip()
+
+        # JSON 배열 추출
+        array_match = re.search(r'\[[\s\S]*\]', json_str)
+        if array_match:
+            json_str = array_match.group(0)
+
+        try:
+            data_list = json.loads(json_str)
+
+            if isinstance(data_list, list):
+                for item in data_list:
+                    if isinstance(item, dict):
+                        ticker = item.get('ticker', '')
+
+                        # 티커 매칭
+                        matched_ticker = None
+                        for t in all_tickers:
+                            code = t.replace('.KS', '').replace('.KQ', '')
+                            if ticker == t or ticker == code:
+                                matched_ticker = t
+                                break
+
+                        if matched_ticker:
+                            results[matched_ticker] = item
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"통합 배치 JSON 파싱 실패: {e}")
 
         return results
 
