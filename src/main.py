@@ -7,8 +7,10 @@ import sys
 import os
 import warnings
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
+
+import holidays
 
 # 불필요한 경고 메시지 필터링 (google-generativeai FutureWarning 등)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -54,6 +56,58 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def is_korean_holiday_or_weekend() -> tuple[bool, str]:
+    """
+    대한민국 기준 공휴일 또는 주말인지 확인
+
+    Returns:
+        (is_holiday: bool, reason: str)
+    """
+    KST = ZoneInfo("Asia/Seoul")
+    now_kst = datetime.now(KST)
+    today = now_kst.date()
+
+    # 주말 체크 (토요일=5, 일요일=6)
+    if today.weekday() >= 5:
+        day_name = "토요일" if today.weekday() == 5 else "일요일"
+        return True, f"주말 ({day_name})"
+
+    # 대한민국 공휴일 체크
+    kr_holidays = holidays.KR(years=today.year)
+    if today in kr_holidays:
+        holiday_name = kr_holidays.get(today)
+        return True, f"공휴일 ({holiday_name})"
+
+    return False, ""
+
+
+def should_skip_evening_report() -> tuple[bool, str]:
+    """
+    저녁 리포트를 스킵해야 하는지 확인
+    휴일(주말/공휴일)에는 오전 8시 1회만 발송
+
+    Returns:
+        (should_skip: bool, reason: str)
+    """
+    KST = ZoneInfo("Asia/Seoul")
+    now_kst = datetime.now(KST)
+    current_hour = now_kst.hour
+
+    # 저녁 시간대 판단 (18:00 이후 = 저녁 리포트)
+    is_evening = current_hour >= 18
+
+    if not is_evening:
+        return False, ""
+
+    # 휴일 체크
+    is_holiday, holiday_reason = is_korean_holiday_or_weekend()
+
+    if is_holiday:
+        return True, f"{holiday_reason} - 저녁 리포트 스킵 (오전 1회만 발송)"
+
+    return False, ""
+
+
 def main():
     """메인 실행 함수"""
     try:
@@ -62,9 +116,16 @@ def main():
         if TEST_MODE:
             logger.info("🧪 테스트 모드 활성화 - 메시지 발송 포함")
         logger.info("=" * 50)
-        
+
+        # 휴일 저녁 리포트 스킵 체크
+        should_skip, skip_reason = should_skip_evening_report()
+        if should_skip and not TEST_MODE:
+            logger.info(f"📅 {skip_reason}")
+            logger.info("프로그램 종료")
+            return
+
         # 설정 로드 확인
-        logger.info(f"설정 로드 완료: {settings}")
+        logger.info(f"설정 로드 확인: 티커 {len(settings.tickers)}개")
         logger.info(f"분석 대상 종목: {settings.tickers}")
         
         # Step 1: 주가 데이터 수집 및 요약 (카테고리별)
