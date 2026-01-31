@@ -2017,12 +2017,75 @@ def get_global_institutional_data(ticker_symbol: str) -> Optional[float]:
         return None
 
 
+# ===== 배치 캐시 시스템 (Vision API 1회 호출용) =====
+_batch_cache: Dict[str, Dict[str, Optional[float]]] = {}
+
+
+def prefetch_dual_source_batch(ticker_codes: list) -> None:
+    """
+    듀얼 소스 배치 수집 (Vision API 1회 호출)
+
+    main.py에서 분석 전에 호출하여 모든 종목 데이터를 미리 수집합니다.
+    이후 get_kr_stock_data_v2() 호출 시 캐시된 데이터를 반환합니다.
+
+    Args:
+        ticker_codes: 티커 코드 리스트
+    """
+    global _batch_cache
+
+    if not ticker_codes:
+        return
+
+    try:
+        from src.dual_source import get_collector
+
+        collector = get_collector()
+        logger.info(f"듀얼 소스 배치 수집 시작: {len(ticker_codes)}개 종목 (Vision API 1회)")
+
+        # 배치 수집 (Vision API 1회 호출)
+        batch_results = collector.collect_batch_single_vision(ticker_codes)
+
+        # 결과를 캐시에 저장
+        for ticker, validated in batch_results.items():
+            data = validated.get('data', {})
+            result: Dict[str, Optional[float]] = {
+                'foreign_net': data.get('foreign_net'),
+                'institutional_net': data.get('institutional_net'),
+                'foreign_net_1d': data.get('foreign_net_1d'),
+                'institutional_net_1d': data.get('institutional_net_1d'),
+                'disparity_rate': data.get('disparity_rate'),
+                'total_volume': data.get('total_volume'),
+                'total_volume_1d': data.get('total_volume_1d'),
+                '_confidence': validated.get('confidence', 0.0),
+                '_validation_status': validated.get('validation', {}).get('status', 'unknown'),
+            }
+
+            # ValidationStatus enum을 문자열로 변환
+            status = result.get('_validation_status')
+            if hasattr(status, 'value'):
+                result['_validation_status'] = status.value
+
+            _batch_cache[ticker] = result
+
+        logger.info(f"듀얼 소스 배치 수집 완료: {len(_batch_cache)}개 캐싱됨")
+
+    except Exception as e:
+        logger.error(f"듀얼 소스 배치 수집 실패: {e}")
+
+
+def clear_batch_cache() -> None:
+    """배치 캐시 초기화"""
+    global _batch_cache
+    _batch_cache.clear()
+    logger.debug("배치 캐시 초기화됨")
+
+
 def get_kr_stock_data_v2(ticker_code: str) -> Dict[str, Optional[float]]:
     """
     듀얼 소스 시스템을 사용한 국내 주식 데이터 수집 (병렬 수집 + 교차 검증)
 
-    기존 get_kr_stock_data() 함수와 동일한 반환 형식을 유지하여 호환성을 보장합니다.
-    추가로 신뢰도(_confidence)와 검증 상태(_validation_status) 메타데이터를 포함합니다.
+    prefetch_dual_source_batch()로 미리 수집된 데이터가 있으면 캐시에서 반환합니다.
+    캐시가 없으면 개별 수집을 수행합니다 (Vision API 추가 호출 발생).
 
     Args:
         ticker_code: 국내 티커 코드 (예: '005930.KS', '379810.KS')
@@ -2040,6 +2103,16 @@ def get_kr_stock_data_v2(ticker_code: str) -> Dict[str, Optional[float]]:
             '_validation_status': 검증 상태 (match, partial, conflict, single, empty)
         }
     """
+    global _batch_cache
+
+    # 1. 캐시에서 먼저 조회
+    if ticker_code in _batch_cache:
+        logger.debug(f"{ticker_code}: 배치 캐시에서 반환 (Vision API 호출 없음)")
+        return _batch_cache[ticker_code]
+
+    # 2. 캐시에 없으면 개별 수집 (기존 방식, Vision API 호출 발생)
+    logger.debug(f"{ticker_code}: 배치 캐시 미스, 개별 수집 수행")
+
     try:
         from src.dual_source import get_collector
 

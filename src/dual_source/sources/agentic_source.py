@@ -29,6 +29,33 @@ logger = logging.getLogger(__name__)
 os.environ.setdefault("GRPC_DNS_RESOLVER", "native")
 os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 
+# 배치 처리용 프롬프트 (여러 스크린샷 동시 처리)
+BATCH_EXTRACTION_PROMPT_TEMPLATE = """아래는 여러 종목의 네이버 금융 스크린샷입니다.
+각 이미지는 순서대로 다음 종목에 해당합니다:
+{ticker_list}
+
+각 종목의 스크린샷에서 다음 데이터를 추출해주세요:
+1. 외국인 순매매량 - 최근 1거래일 (테이블 첫 번째 행)
+2. 외국인 순매매량 - 최근 3거래일 합계 (테이블 상위 3개 행의 합)
+3. 기관 순매매량 - 최근 1거래일 (테이블 첫 번째 행)
+4. 기관 순매매량 - 최근 3거래일 합계 (테이블 상위 3개 행의 합)
+5. ETF인 경우 NAV 괴리율 (%)
+
+반드시 아래 JSON 배열 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력:
+[
+  {{"ticker": "종목코드1", "foreign_net_1d": 숫자또는null, "foreign_net_3d": 숫자또는null, "institutional_net_1d": 숫자또는null, "institutional_net_3d": 숫자또는null, "disparity_rate": 숫자또는null}},
+  {{"ticker": "종목코드2", "foreign_net_1d": 숫자또는null, "foreign_net_3d": 숫자또는null, "institutional_net_1d": 숫자또는null, "institutional_net_3d": 숫자또는null, "disparity_rate": 숫자또는null}}
+]
+
+주의사항:
+- 숫자에서 쉼표(,)는 제거하고 순수 숫자만
+- 매도가 많으면 음수(-)로 표시
+- 찾을 수 없는 데이터는 null
+- 단위는 주(株) 단위로 반환 (만주 아님)
+- 3거래일 합계는 테이블의 상위 3개 행 값을 직접 더해서 계산
+- 이미지 순서와 종목 순서가 정확히 일치해야 함
+"""
+
 # 한국 주식 수급 데이터 추출 프롬프트
 KOREA_STOCK_EXTRACTION_PROMPT = """이 네이버 금융 스크린샷에서 다음 데이터를 추출해주세요.
 
@@ -508,3 +535,331 @@ class AgenticScreenshotSource(DataSourceBase):
                 asyncio.run(self.cleanup())
             except Exception:
                 pass
+
+    # ===== 배치 처리 메서드 (Vision API 1회 호출) =====
+
+    async def capture_screenshots_batch(
+        self, ticker_codes: list[str]
+    ) -> dict[str, bytes]:
+        """
+        여러 티커의 스크린샷을 병렬로 캡처
+
+        Args:
+            ticker_codes: 티커 코드 리스트
+
+        Returns:
+            {ticker_code: screenshot_bytes} 딕셔너리
+        """
+        screenshots = {}
+
+        # 한국 주식과 해외 주식 분리
+        kr_tickers = [t for t in ticker_codes if self._is_korean_stock(t)]
+        us_tickers = [t for t in ticker_codes if not self._is_korean_stock(t)]
+
+        # 한국 주식 스크린샷 캡처
+        for ticker in kr_tickers:
+            try:
+                code = ticker.replace('.KS', '').replace('.KQ', '')
+                url = f"https://finance.naver.com/item/frgn.naver?code={code}"
+                screenshot = await self._capture_screenshot(url, wait_selector='table')
+                screenshots[ticker] = screenshot
+                logger.debug(f"스크린샷 캡처 완료: {ticker}")
+            except Exception as e:
+                logger.warning(f"스크린샷 캡처 실패 ({ticker}): {e}")
+
+        # 해외 주식 스크린샷 캡처
+        for ticker in us_tickers:
+            try:
+                url = f"https://finance.yahoo.com/quote/{ticker}/holders"
+                screenshot = await self._capture_screenshot(url, wait_selector='table')
+                screenshots[ticker] = screenshot
+                logger.debug(f"스크린샷 캡처 완료: {ticker}")
+            except Exception as e:
+                logger.warning(f"스크린샷 캡처 실패 ({ticker}): {e}")
+
+        logger.info(f"배치 스크린샷 캡처 완료: {len(screenshots)}/{len(ticker_codes)}개 성공")
+        return screenshots
+
+    def extract_batch_with_vision(
+        self, screenshots: dict[str, bytes]
+    ) -> dict[str, SupplyDemandData]:
+        """
+        여러 스크린샷을 한 번의 Vision API 호출로 처리 (API 호출 1회)
+
+        Args:
+            screenshots: {ticker_code: screenshot_bytes} 딕셔너리
+
+        Returns:
+            {ticker_code: SupplyDemandData} 딕셔너리
+        """
+        if not screenshots:
+            return {}
+
+        from google.genai import types
+
+        # 키 매니저 초기화
+        if self._key_manager is None:
+            from config.settings import get_api_key_manager
+            self._key_manager = get_api_key_manager()
+
+        # 한국 주식과 해외 주식 분리
+        kr_screenshots = {k: v for k, v in screenshots.items() if self._is_korean_stock(k)}
+        us_screenshots = {k: v for k, v in screenshots.items() if not self._is_korean_stock(k)}
+
+        results: dict[str, SupplyDemandData] = {}
+
+        # 한국 주식 배치 처리
+        if kr_screenshots:
+            kr_results = self._extract_batch_korean(kr_screenshots)
+            results.update(kr_results)
+
+        # 해외 주식 배치 처리
+        if us_screenshots:
+            us_results = self._extract_batch_us(us_screenshots)
+            results.update(us_results)
+
+        return results
+
+    def _extract_batch_korean(
+        self, screenshots: dict[str, bytes]
+    ) -> dict[str, SupplyDemandData]:
+        """한국 주식 배치 Vision 추출 (1회 API 호출)"""
+        from google.genai import types
+
+        results: dict[str, SupplyDemandData] = {}
+        ticker_list = list(screenshots.keys())
+
+        if not ticker_list:
+            return results
+
+        # 프롬프트 생성
+        ticker_list_str = "\n".join([
+            f"{i+1}. {t.replace('.KS', '').replace('.KQ', '')} ({t})"
+            for i, t in enumerate(ticker_list)
+        ])
+        prompt = BATCH_EXTRACTION_PROMPT_TEMPLATE.format(ticker_list=ticker_list_str)
+
+        # API 호출 (이미지 + 프롬프트)
+        max_attempts = self._key_manager.total_keys
+        last_error = None
+
+        for attempt in range(max_attempts):
+            try:
+                self._init_gemini_client()
+
+                # 요청 내용 구성: 이미지들 + 프롬프트
+                contents = []
+                for ticker in ticker_list:
+                    contents.append(types.Part.from_bytes(
+                        data=screenshots[ticker],
+                        mime_type='image/png'
+                    ))
+                contents.append(prompt)
+
+                response = self._client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=65536,
+                    )
+                )
+
+                response_text = response.text if hasattr(response, 'text') else ""
+                logger.info(f"배치 Vision API 호출 완료 (한국 주식 {len(ticker_list)}개)")
+                logger.debug(f"배치 Vision 응답: {response_text[:1000]}")
+
+                # JSON 파싱
+                parsed = self._parse_batch_json_response(response_text, ticker_list)
+
+                # 결과 변환
+                for ticker, data in parsed.items():
+                    result: SupplyDemandData = {}
+
+                    if data.get('foreign_net_1d') is not None:
+                        result['foreign_net_1d'] = round(float(data['foreign_net_1d']) / 10000, 2)
+                    if data.get('foreign_net_3d') is not None:
+                        result['foreign_net'] = round(float(data['foreign_net_3d']) / 10000, 2)
+                    if data.get('institutional_net_1d') is not None:
+                        result['institutional_net_1d'] = round(float(data['institutional_net_1d']) / 10000, 2)
+                    if data.get('institutional_net_3d') is not None:
+                        result['institutional_net'] = round(float(data['institutional_net_3d']) / 10000, 2)
+                    if data.get('disparity_rate') is not None:
+                        result['disparity_rate'] = float(data['disparity_rate'])
+
+                    results[ticker] = result
+
+                return results
+
+            except Exception as e:
+                error_str = str(e)
+                last_error = e
+
+                if 'quota' in error_str.lower() or '429' in error_str:
+                    logger.warning(f"⚠️ 배치 Vision API 할당량 초과")
+                    if self._key_manager.mark_key_exhausted():
+                        self._client = None
+                        continue
+                    else:
+                        break
+                else:
+                    logger.error(f"배치 Vision API 에러: {error_str}")
+                    break
+
+        logger.error(f"배치 Vision API 호출 실패: {last_error}")
+        return results
+
+    def _extract_batch_us(
+        self, screenshots: dict[str, bytes]
+    ) -> dict[str, SupplyDemandData]:
+        """해외 주식 배치 Vision 추출 (1회 API 호출)"""
+        from google.genai import types
+
+        results: dict[str, SupplyDemandData] = {}
+        ticker_list = list(screenshots.keys())
+
+        if not ticker_list:
+            return results
+
+        # 해외 주식용 배치 프롬프트
+        ticker_list_str = "\n".join([f"{i+1}. {t}" for i, t in enumerate(ticker_list)])
+        prompt = f"""Below are Yahoo Finance screenshots for multiple stocks.
+Images are in order for these tickers:
+{ticker_list_str}
+
+Extract institutional holdings percentage from each screenshot.
+
+Respond ONLY in this JSON array format:
+[
+  {{"ticker": "TICKER1", "institutional_held": number_or_null}},
+  {{"ticker": "TICKER2", "institutional_held": number_or_null}}
+]
+
+Notes:
+- Remove commas from numbers
+- Return null if not found
+- Match image order with ticker order exactly
+"""
+
+        max_attempts = self._key_manager.total_keys
+        last_error = None
+
+        for attempt in range(max_attempts):
+            try:
+                self._init_gemini_client()
+
+                contents = []
+                for ticker in ticker_list:
+                    contents.append(types.Part.from_bytes(
+                        data=screenshots[ticker],
+                        mime_type='image/png'
+                    ))
+                contents.append(prompt)
+
+                response = self._client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=65536,
+                    )
+                )
+
+                response_text = response.text if hasattr(response, 'text') else ""
+                logger.info(f"배치 Vision API 호출 완료 (해외 주식 {len(ticker_list)}개)")
+
+                parsed = self._parse_batch_json_response(response_text, ticker_list)
+
+                for ticker, data in parsed.items():
+                    result: SupplyDemandData = {}
+                    if data.get('institutional_held') is not None:
+                        result['institutional_net'] = float(data['institutional_held'])
+                    results[ticker] = result
+
+                return results
+
+            except Exception as e:
+                error_str = str(e)
+                last_error = e
+
+                if 'quota' in error_str.lower() or '429' in error_str:
+                    if self._key_manager.mark_key_exhausted():
+                        self._client = None
+                        continue
+                    else:
+                        break
+                else:
+                    break
+
+        logger.error(f"배치 Vision API 호출 실패 (해외): {last_error}")
+        return results
+
+    def _parse_batch_json_response(
+        self, response_text: str, ticker_list: list[str]
+    ) -> dict[str, dict]:
+        """배치 Vision 응답 JSON 파싱"""
+        results = {}
+
+        if not response_text:
+            return results
+
+        json_str = response_text.strip()
+
+        # 마크다운 코드 블록 처리
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', json_str)
+        if json_match:
+            json_str = json_match.group(1).strip()
+
+        # JSON 배열 추출
+        array_match = re.search(r'\[[\s\S]*\]', json_str)
+        if array_match:
+            json_str = array_match.group(0)
+
+        try:
+            data_list = json.loads(json_str)
+
+            if isinstance(data_list, list):
+                for item in data_list:
+                    if isinstance(item, dict):
+                        ticker = item.get('ticker', '')
+                        # ticker 매칭 (코드만 또는 전체 티커)
+                        matched_ticker = None
+                        for t in ticker_list:
+                            code = t.replace('.KS', '').replace('.KQ', '')
+                            if ticker == t or ticker == code:
+                                matched_ticker = t
+                                break
+
+                        if matched_ticker:
+                            results[matched_ticker] = item
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"배치 JSON 파싱 실패: {e}")
+
+        return results
+
+    def collect_batch_sync(self, ticker_codes: list[str]) -> dict[str, SupplyDemandData]:
+        """
+        동기 방식 배치 수집 (Vision API 1회 호출)
+
+        Args:
+            ticker_codes: 티커 코드 리스트
+
+        Returns:
+            {ticker_code: SupplyDemandData} 딕셔너리
+        """
+        async def _async_batch():
+            screenshots = await self.capture_screenshots_batch(ticker_codes)
+            return self.extract_batch_with_vision(screenshots)
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, _async_batch())
+                    return future.result(timeout=120)
+            else:
+                return loop.run_until_complete(_async_batch())
+        except RuntimeError:
+            return asyncio.run(_async_batch())

@@ -240,6 +240,88 @@ class DualSourceCollector:
         if hasattr(self, '_executor'):
             self._executor.shutdown(wait=False)
 
+    # ===== 배치 처리 (Vision API 1회 호출) =====
+
+    def collect_batch_single_vision(
+        self, ticker_codes: List[str]
+    ) -> Dict[str, ValidatedStockData]:
+        """
+        배치 수집: Vision API 1회 + API 소스 병렬 수집
+
+        Agentic Vision은 모든 스크린샷을 모아서 1회만 호출합니다.
+        API 소스는 종목별로 병렬 수집합니다.
+
+        Args:
+            ticker_codes: 티커 코드 리스트
+
+        Returns:
+            {ticker_code: ValidatedStockData} 딕셔너리
+        """
+        result_dict: Dict[str, ValidatedStockData] = {}
+
+        # 1. Agentic Vision 배치 수집 (1회 API 호출)
+        agentic_results: Dict[str, CollectionResult] = {}
+
+        if self._source_a and self._enable_agentic:
+            try:
+                logger.info(f"Agentic Vision 배치 수집 시작: {len(ticker_codes)}개 종목")
+                raw_results = self._source_a.collect_batch_sync(ticker_codes)
+
+                # CollectionResult 형식으로 변환
+                from datetime import datetime
+                for ticker, data in raw_results.items():
+                    agentic_results[ticker] = {
+                        'source_name': 'agentic_screenshot',
+                        'data': data,
+                        'success': bool(data),
+                        'error': None,
+                        'elapsed_time': 0.0,
+                        'timestamp': datetime.now()
+                    }
+
+                logger.info(f"Agentic Vision 배치 수집 완료: {len(agentic_results)}개 성공")
+
+            except Exception as e:
+                logger.warning(f"Agentic Vision 배치 수집 실패: {e}")
+
+        # 2. API 소스 병렬 수집 (종목별)
+        api_results: Dict[str, CollectionResult] = {}
+
+        def collect_api(ticker: str) -> tuple:
+            try:
+                result = self._source_b.collect(ticker)
+                return ticker, result
+            except Exception as e:
+                logger.warning(f"{ticker} API 수집 실패: {e}")
+                return ticker, None
+
+        futures = {
+            self._executor.submit(collect_api, ticker): ticker
+            for ticker in ticker_codes
+        }
+
+        for future in as_completed(futures, timeout=self._timeout * 2):
+            try:
+                ticker, result = future.result()
+                if result:
+                    api_results[ticker] = result
+            except Exception as e:
+                logger.warning(f"API 수집 future 실패: {e}")
+
+        logger.info(f"API 소스 배치 수집 완료: {len(api_results)}개 성공")
+
+        # 3. 검증 및 병합
+        for ticker in ticker_codes:
+            source_a_result = agentic_results.get(ticker)
+            source_b_result = api_results.get(ticker)
+
+            validated = self._validation_engine.validate_and_merge(
+                ticker, source_a_result, source_b_result
+            )
+            result_dict[ticker] = validated
+
+        return result_dict
+
 
 # 기본 컬렉터 인스턴스 (싱글톤 패턴)
 _default_collector: Optional[DualSourceCollector] = None

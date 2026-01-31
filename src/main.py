@@ -138,7 +138,27 @@ def main():
         # 설정 로드 확인
         logger.info(f"설정 로드 확인: 티커 {len(settings.tickers)}개")
         logger.info(f"분석 대상 종목: {settings.tickers}")
-        
+
+        # Step 0: 듀얼 소스 배치 수집 (Vision API 1회 호출)
+        # 모든 종목의 스크린샷을 한 번에 수집하여 Gemini Vision API 호출 횟수 최소화
+        logger.info("\n[Step 0] 듀얼 소스 배치 수집 시작 (Vision API 1회)...")
+        try:
+            from src.crawler import prefetch_dual_source_batch, clear_batch_cache
+
+            # 모든 종목 코드 수집
+            all_tickers_for_batch = (
+                settings.tickers_possession_domestic +
+                settings.tickers_possession_overseas +
+                settings.tickers_interest_domestic +
+                settings.tickers_interest_overseas
+            )
+
+            # 배치 수집 실행 (Vision API 1회 호출)
+            prefetch_dual_source_batch(all_tickers_for_batch)
+            logger.info("듀얼 소스 배치 수집 완료")
+        except Exception as e:
+            logger.warning(f"듀얼 소스 배치 수집 실패 (개별 수집으로 fallback): {e}")
+
         # Step 1: 주가 데이터 수집 및 요약 (카테고리별)
         logger.info("\n[Step 1] 주가 데이터 수집 및 요약 시작 (카테고리별)...")
         stock_summaries = get_stock_summary_by_category(
