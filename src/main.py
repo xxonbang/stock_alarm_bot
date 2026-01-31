@@ -44,6 +44,12 @@ from src.notifier import create_notifier
 # 테스트 모드 확인 (환경변수 또는 명령줄 인자)
 TEST_MODE = os.getenv('TEST_MODE', 'false').lower() == 'true' or '--test' in sys.argv
 
+# 수동 실행 확인 (GitHub Actions workflow_dispatch 또는 로컬 실행)
+# - workflow_dispatch: GitHub에서 수동 실행
+# - 로컬 실행: TRIGGER_TYPE이 없으면 수동 실행으로 간주
+TRIGGER_TYPE = os.getenv('TRIGGER_TYPE', '')
+IS_MANUAL_RUN = TRIGGER_TYPE == 'workflow_dispatch' or TRIGGER_TYPE == ''
+
 # 로깅 설정
 logging.basicConfig(
     level=logging.INFO,
@@ -114,15 +120,20 @@ def main():
         logger.info("=" * 50)
         logger.info("Stock Insight Bot 시작")
         if TEST_MODE:
-            logger.info("🧪 테스트 모드 활성화 - 메시지 발송 포함")
+            logger.info("🧪 테스트 모드 활성화")
+        if IS_MANUAL_RUN:
+            logger.info("🖐️ 수동 실행 감지 (휴일 스킵 무시)")
         logger.info("=" * 50)
 
         # 휴일 저녁 리포트 스킵 체크
+        # 단, 수동 실행(workflow_dispatch, 로컬) 또는 테스트 모드에서는 스킵하지 않음
         should_skip, skip_reason = should_skip_evening_report()
-        if should_skip and not TEST_MODE:
+        if should_skip and not TEST_MODE and not IS_MANUAL_RUN:
             logger.info(f"📅 {skip_reason}")
             logger.info("프로그램 종료")
             return
+        elif should_skip and IS_MANUAL_RUN:
+            logger.info(f"📅 {skip_reason} (수동 실행이므로 계속 진행)")
 
         # 설정 로드 확인
         logger.info(f"설정 로드 확인: 티커 {len(settings.tickers)}개")

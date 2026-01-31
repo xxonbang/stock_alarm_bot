@@ -37,6 +37,8 @@ jobs:
 
       - name: Run Stock Insight Bot
         env:
+          # 실행 트리거 타입 (schedule: 자동, workflow_dispatch: 수동)
+          TRIGGER_TYPE: ${{ github.event_name }}
           # 필수 환경 변수
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
