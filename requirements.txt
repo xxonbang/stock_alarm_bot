@@ -40,3 +40,6 @@ urllib3>=2.0.0
 # 브라우저 자동화 (Agentic Screenshot 용)
 # Puppeteer의 Python 대안
 playwright>=1.40.0
+
+# Supabase (API 키 공유 저장소)
+supabase>=2.0.0

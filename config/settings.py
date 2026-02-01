@@ -106,9 +106,32 @@ class Settings:
         # === 추가 데이터 소스 API 키 (선택사항) ===
 
         # 한국투자증권 (KIS) API (한국 주식 수급 데이터)
+        # 우선순위: Supabase → 환경변수
         # https://apiportal.koreainvestment.com 에서 발급
-        self.kis_app_key = os.getenv('KIS_APP_KEY', None)
-        self.kis_app_secret = os.getenv('KIS_APP_SECRET', None)
+        self.kis_app_key = None
+        self.kis_app_secret = None
+        self._kis_source = None  # 자격증명 소스 (supabase/env)
+
+        # Supabase에서 KIS 자격증명 로드 시도
+        try:
+            from config.supabase_credentials import get_supabase_credentials_manager
+            creds_manager = get_supabase_credentials_manager()
+            kis_creds = creds_manager.get_kis_credentials()
+
+            if kis_creds:
+                self.kis_app_key = kis_creds.app_key
+                self.kis_app_secret = kis_creds.app_secret
+                self._kis_source = kis_creds.source
+        except Exception:
+            pass
+
+        # Supabase 실패 시 환경변수 fallback
+        if not self.kis_app_key:
+            self.kis_app_key = os.getenv('KIS_APP_KEY', None)
+        if not self.kis_app_secret:
+            self.kis_app_secret = os.getenv('KIS_APP_SECRET', None)
+        if self.kis_app_key and self.kis_app_secret and not self._kis_source:
+            self._kis_source = 'env'
 
         # Twelve Data API (미국 주식 주요 Fallback)
         # https://twelvedata.com 에서 무료 발급 (800 calls/day)

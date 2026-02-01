@@ -287,16 +287,36 @@ class KISSource(DataSourceBase):
     def __init__(self, app_key: Optional[str] = None, app_secret: Optional[str] = None):
         """
         Args:
-            app_key: KIS 앱키 (환경변수에서 로드 가능)
-            app_secret: KIS 앱 시크릿 (환경변수에서 로드 가능)
+            app_key: KIS 앱키 (Supabase 또는 환경변수에서 로드 가능)
+            app_secret: KIS 앱 시크릿 (Supabase 또는 환경변수에서 로드 가능)
         """
         super().__init__()
         self._token_manager = get_kis_token_manager()
 
-        # 환경변수에서 로드 (없으면 인자 사용)
-        import os
-        key = app_key or os.getenv('KIS_APP_KEY')
-        secret = app_secret or os.getenv('KIS_APP_SECRET')
+        key = app_key
+        secret = app_secret
+
+        # 인자가 없으면 Supabase → 환경변수 순으로 로드
+        if not (key and secret):
+            try:
+                from config.supabase_credentials import get_supabase_credentials_manager
+                creds_manager = get_supabase_credentials_manager()
+                kis_creds = creds_manager.get_kis_credentials()
+
+                if kis_creds:
+                    key = kis_creds.app_key
+                    secret = kis_creds.app_secret
+                    logger.info(f"✅ KIS 자격증명 로드됨 (소스: {kis_creds.source})")
+            except Exception as e:
+                logger.debug(f"Supabase 자격증명 로드 실패: {e}")
+
+        # 여전히 없으면 환경변수에서 직접 로드 (fallback)
+        if not (key and secret):
+            import os
+            key = os.getenv('KIS_APP_KEY')
+            secret = os.getenv('KIS_APP_SECRET')
+            if key and secret:
+                logger.info("✅ KIS 자격증명 로드됨 (소스: env fallback)")
 
         if key and secret:
             self._token_manager.configure(key, secret)
