@@ -195,11 +195,12 @@ class KISTokenManager:
 
     def get_token(self) -> Optional[str]:
         """
-        유효한 액세스 토큰 반환 (파일 캐싱 우선)
+        유효한 액세스 토큰 반환 (Supabase 공유 → 파일 캐시 → 신규 발급)
 
         1. 메모리에 유효한 토큰이 있으면 반환
-        2. 파일에서 유효한 토큰 로드 시도
-        3. 모두 실패 시 새로 발급 (1일 1회 제한 주의)
+        2. Supabase에서 공유 토큰 로드 시도 (여러 프로젝트 간 공유)
+        3. 파일에서 유효한 토큰 로드 시도
+        4. 모두 실패 시 새로 발급 (1일 1회 제한 주의)
         """
         if not self.is_configured():
             return None
@@ -208,20 +209,57 @@ class KISTokenManager:
         if self._access_token and time.time() < (self._token_expires_at - 300):
             return self._access_token
 
-        # 2. 파일에서 토큰 로드 시도
+        # 2. Supabase에서 공유 토큰 로드 시도
+        if self._load_token_from_supabase():
+            return self._access_token
+
+        # 3. 파일에서 토큰 로드 시도
         if self._load_token_from_file():
             return self._access_token
 
-        # 3. 새 토큰 발급 (주의: 1일 1회 제한)
+        # 4. 새 토큰 발급 (주의: 1일 1회 제한)
         logger.info("🔄 KIS 토큰 신규 발급 시도 (1일 1회 제한 주의)")
         return self._refresh_token()
+
+    def _load_token_from_supabase(self) -> bool:
+        """
+        Supabase에서 공유 토큰 로드 (여러 프로젝트 간 토큰 공유)
+
+        Returns:
+            True: 유효한 토큰 로드 성공
+            False: 토큰 없음 또는 만료
+        """
+        try:
+            from config.supabase_credentials import get_supabase_credentials_manager
+
+            creds_manager = get_supabase_credentials_manager()
+            if not creds_manager.is_supabase_available:
+                return False
+
+            kis_token = creds_manager.get_kis_token()
+            if not kis_token or not kis_token.is_valid:
+                return False
+
+            # Supabase 토큰을 메모리와 파일에 저장
+            self._access_token = kis_token.access_token
+            self._token_expires_at = kis_token.expires_at
+
+            # 로컬 파일에도 캐싱 (다음 실행 시 Supabase 조회 없이 사용 가능)
+            self._save_token_to_file()
+
+            logger.info(f"✅ Supabase에서 KIS 공유 토큰 로드 (남은 유효시간: ~{kis_token.remaining_hours}시간)")
+            return True
+
+        except Exception as e:
+            logger.debug(f"Supabase 토큰 로드 실패: {e}")
+            return False
 
     def _refresh_token(self) -> Optional[str]:
         """
         토큰 발급/갱신
 
         주의: 한국투자증권 API는 1일 1회 토큰 발급 제한이 있습니다.
-        발급 성공 시 파일에 캐싱하여 재사용합니다.
+        발급 성공 시 파일 및 Supabase에 저장하여 여러 프로젝트에서 공유합니다.
         """
         try:
             url = f"{self.BASE_URL}/oauth2/tokenP"
@@ -245,6 +283,9 @@ class KISTokenManager:
                 # 파일에 캐싱 (다음 실행 시 재사용)
                 self._save_token_to_file()
 
+                # Supabase에 저장 (여러 프로젝트 간 공유)
+                self._save_token_to_supabase()
+
                 return self._access_token
             else:
                 logger.error(f"❌ KIS 토큰 발급 실패: {response.status_code} - {response.text}")
@@ -254,12 +295,49 @@ class KISTokenManager:
             logger.error(f"❌ KIS 토큰 발급 오류: {e}")
             return None
 
+    def _save_token_to_supabase(self) -> bool:
+        """
+        토큰을 Supabase에 저장 (여러 프로젝트 간 공유)
+
+        Returns:
+            성공 여부
+        """
+        if not self._access_token:
+            return False
+
+        try:
+            from config.supabase_credentials import get_supabase_credentials_manager
+
+            creds_manager = get_supabase_credentials_manager()
+            if not creds_manager.is_supabase_available:
+                logger.debug("Supabase 미연결 - 토큰 공유 스킵")
+                return False
+
+            return creds_manager.update_kis_token(
+                access_token=self._access_token,
+                expires_at=self._token_expires_at
+            )
+
+        except Exception as e:
+            logger.debug(f"Supabase 토큰 저장 실패: {e}")
+            return False
+
     def invalidate(self):
         """토큰 무효화 (토큰 만료 감지 시 호출)"""
         self._access_token = None
         self._token_expires_at = 0
         self._delete_cache_file()
-        logger.info("🔄 KIS 토큰 무효화됨 (캐시 삭제, 재발급 필요)")
+
+        # Supabase에서도 토큰 무효화 (다른 프로젝트에서 새 토큰 발급 유도)
+        try:
+            from config.supabase_credentials import get_supabase_credentials_manager
+            creds_manager = get_supabase_credentials_manager()
+            if creds_manager.is_supabase_available:
+                creds_manager.invalidate_kis_token()
+        except Exception as e:
+            logger.debug(f"Supabase 토큰 무효화 실패: {e}")
+
+        logger.info("🔄 KIS 토큰 무효화됨 (로컬 캐시 + Supabase 삭제, 재발급 필요)")
 
     @property
     def app_key(self) -> Optional[str]:

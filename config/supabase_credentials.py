@@ -6,12 +6,18 @@ Supabase 기반 API 자격증명 관리자
 
 테이블 구조 (api_credentials):
 - service_name: 서비스 이름 (예: 'kis')
-- credential_type: 자격증명 타입 (예: 'app_key', 'app_secret')
+- credential_type: 자격증명 타입 (예: 'app_key', 'app_secret', 'access_token', 'token_expires_at')
 - credential_value: 자격증명 값
 - is_active: 활성 상태
+
+KIS 토큰 공유:
+- access_token: OAuth 액세스 토큰 (24시간 유효)
+- token_expires_at: 토큰 만료 시간 (Unix timestamp)
+- 여러 프로젝트에서 동일한 토큰을 공유하여 1일 1회 발급 제한 준수
 """
 import os
 import logging
+import time
 from typing import Optional, Dict, Tuple
 from dataclasses import dataclass
 
@@ -24,6 +30,24 @@ class KISCredentials:
     app_key: str
     app_secret: str
     source: str  # 'supabase' or 'env'
+
+
+@dataclass
+class KISToken:
+    """KIS API 액세스 토큰 (여러 프로젝트 간 공유)"""
+    access_token: str
+    expires_at: float  # Unix timestamp
+    source: str  # 'supabase' or 'local'
+
+    @property
+    def is_valid(self) -> bool:
+        """토큰 유효성 확인 (만료 5분 전까지 유효)"""
+        return time.time() < (self.expires_at - 300)
+
+    @property
+    def remaining_hours(self) -> int:
+        """남은 유효시간 (시간)"""
+        return max(0, int((self.expires_at - time.time()) / 3600))
 
 
 class SupabaseCredentialsManager:
@@ -208,6 +232,137 @@ class SupabaseCredentialsManager:
 
         except Exception as e:
             logger.error(f"KIS 자격증명 업데이트 실패: {e}")
+            return False
+
+    # ===== KIS 토큰 공유 (여러 프로젝트 간) =====
+
+    def get_kis_token(self) -> Optional[KISToken]:
+        """
+        Supabase에서 공유 KIS 토큰 조회
+
+        여러 프로젝트에서 동일한 토큰을 공유하여 1일 1회 발급 제한을 준수합니다.
+
+        Returns:
+            KISToken (유효한 경우) 또는 None (없거나 만료됨)
+        """
+        if self._connection_failed or not self._client:
+            return None
+
+        try:
+            # Supabase에서 토큰 정보 조회
+            credentials = self._fetch_credentials_from_supabase('kis')
+
+            access_token = credentials.get('access_token')
+            expires_at_str = credentials.get('token_expires_at')
+
+            if not access_token or not expires_at_str:
+                logger.debug("Supabase에 KIS 토큰 없음")
+                return None
+
+            try:
+                expires_at = float(expires_at_str)
+            except (ValueError, TypeError):
+                logger.warning(f"KIS 토큰 만료시간 파싱 실패: {expires_at_str}")
+                return None
+
+            token = KISToken(
+                access_token=access_token,
+                expires_at=expires_at,
+                source='supabase'
+            )
+
+            if token.is_valid:
+                logger.info(f"✅ Supabase에서 KIS 토큰 로드 (남은 유효시간: ~{token.remaining_hours}시간)")
+                return token
+            else:
+                logger.info("⏰ Supabase의 KIS 토큰 만료됨")
+                return None
+
+        except Exception as e:
+            logger.warning(f"Supabase KIS 토큰 조회 실패: {e}")
+            return None
+
+    def update_kis_token(self, access_token: str, expires_at: float) -> bool:
+        """
+        KIS 토큰을 Supabase에 업데이트 (여러 프로젝트 간 공유)
+
+        토큰 갱신 시 호출하여 다른 프로젝트에서도 동일한 토큰을 사용할 수 있게 합니다.
+
+        Args:
+            access_token: 액세스 토큰
+            expires_at: 만료 시간 (Unix timestamp)
+
+        Returns:
+            성공 여부
+        """
+        if self._connection_failed or not self._client:
+            logger.debug("Supabase 연결 불가 - 토큰 업데이트 스킵")
+            return False
+
+        try:
+            # access_token 업데이트
+            self._client.table('api_credentials').upsert({
+                'service_name': 'kis',
+                'credential_type': 'access_token',
+                'credential_value': access_token,
+                'is_active': True,
+            }, on_conflict='service_name,credential_type,environment').execute()
+
+            # token_expires_at 업데이트
+            self._client.table('api_credentials').upsert({
+                'service_name': 'kis',
+                'credential_type': 'token_expires_at',
+                'credential_value': str(expires_at),
+                'is_active': True,
+            }, on_conflict='service_name,credential_type,environment').execute()
+
+            # 캐시 갱신
+            if 'kis' not in self._cache:
+                self._cache['kis'] = {}
+            self._cache['kis']['access_token'] = access_token
+            self._cache['kis']['token_expires_at'] = str(expires_at)
+
+            logger.info("✅ KIS 토큰 Supabase 업데이트 완료 (여러 프로젝트 공유)")
+            return True
+
+        except Exception as e:
+            logger.error(f"KIS 토큰 Supabase 업데이트 실패: {e}")
+            return False
+
+    def invalidate_kis_token(self) -> bool:
+        """
+        Supabase의 KIS 토큰 무효화
+
+        토큰이 더 이상 유효하지 않을 때 호출하여
+        다른 프로젝트에서도 새 토큰을 발급받도록 합니다.
+
+        Returns:
+            성공 여부
+        """
+        if self._connection_failed or not self._client:
+            return False
+
+        try:
+            # access_token 비활성화
+            self._client.table('api_credentials').update({
+                'is_active': False,
+            }).eq('service_name', 'kis').eq('credential_type', 'access_token').execute()
+
+            # token_expires_at 비활성화
+            self._client.table('api_credentials').update({
+                'is_active': False,
+            }).eq('service_name', 'kis').eq('credential_type', 'token_expires_at').execute()
+
+            # 캐시에서 토큰 제거
+            if 'kis' in self._cache:
+                self._cache['kis'].pop('access_token', None)
+                self._cache['kis'].pop('token_expires_at', None)
+
+            logger.info("🔄 Supabase KIS 토큰 무효화 완료")
+            return True
+
+        except Exception as e:
+            logger.error(f"KIS 토큰 무효화 실패: {e}")
             return False
 
     def clear_cache(self, service_name: Optional[str] = None):
