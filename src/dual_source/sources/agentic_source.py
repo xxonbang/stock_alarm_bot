@@ -195,13 +195,13 @@ class AgenticScreenshotSource(DataSourceBase):
         try:
             page = await context.new_page()
 
-            # 페이지 로드
-            await page.goto(url, wait_until='networkidle', timeout=30000)
+            # 페이지 로드 (domcontentloaded로 빠르게 로드 후 요소 대기)
+            await page.goto(url, wait_until='domcontentloaded', timeout=30000)
 
-            # 특정 요소 대기 (있는 경우)
+            # 특정 요소 대기 (필수 - 데이터 테이블 로딩 확인)
             if wait_selector:
                 try:
-                    await page.wait_for_selector(wait_selector, timeout=10000)
+                    await page.wait_for_selector(wait_selector, timeout=15000)
                 except Exception:
                     logger.debug(f"선택자 대기 타임아웃: {wait_selector}")
 
