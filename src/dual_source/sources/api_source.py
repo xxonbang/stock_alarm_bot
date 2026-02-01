@@ -27,6 +27,9 @@ from ..types import SupplyDemandData
 
 logger = logging.getLogger(__name__)
 
+# pykrx 라이브러리 내부 경고 로그 억제 (NoneType 에러 등)
+logging.getLogger('pykrx').setLevel(logging.ERROR)
+
 # HTTP 세션 (재사용)
 _session = requests.Session()
 
