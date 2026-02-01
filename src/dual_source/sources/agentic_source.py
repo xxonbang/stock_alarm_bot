@@ -13,6 +13,7 @@ Playwright로 웹 페이지를 렌더링 → 스크린샷 캡처 → Gemini Visi
 - Vision AI API 비용 발생
 """
 import asyncio
+import atexit
 import base64
 import json
 import logging
@@ -24,6 +25,40 @@ from .base import DataSourceBase
 from ..types import SupplyDemandData
 
 logger = logging.getLogger(__name__)
+
+# 전역 인스턴스 추적 (atexit cleanup용)
+_active_instances: list = []
+
+
+def _cleanup_all_instances():
+    """프로그램 종료 시 모든 Playwright 인스턴스 정리"""
+    for instance in _active_instances:
+        if instance._browser or instance._playwright:
+            try:
+                # 동기적으로 정리 시도
+                if instance._browser:
+                    try:
+                        asyncio.get_event_loop().run_until_complete(
+                            instance._browser.close()
+                        )
+                    except Exception:
+                        pass
+                    instance._browser = None
+                if instance._playwright:
+                    try:
+                        asyncio.get_event_loop().run_until_complete(
+                            instance._playwright.stop()
+                        )
+                    except Exception:
+                        pass
+                    instance._playwright = None
+            except Exception:
+                pass
+    _active_instances.clear()
+
+
+# 프로그램 종료 시 자동 정리 등록
+atexit.register(_cleanup_all_instances)
 
 # gRPC DNS 리졸버 설정
 os.environ.setdefault("GRPC_DNS_RESOLVER", "native")
@@ -117,6 +152,9 @@ class AgenticScreenshotSource(DataSourceBase):
         self._playwright = None
         self._client = None
         self._key_manager = None  # 지연 초기화
+
+        # 전역 인스턴스 추적 (atexit cleanup용)
+        _active_instances.append(self)
 
     @property
     def source_name(self) -> str:
@@ -844,8 +882,12 @@ class AgenticScreenshotSource(DataSourceBase):
             {ticker_code: SupplyDemandData} 딕셔너리
         """
         async def _async_batch():
-            screenshots = await self.capture_screenshots_batch(ticker_codes)
-            return self.extract_batch_with_vision(screenshots)
+            try:
+                screenshots = await self.capture_screenshots_batch(ticker_codes)
+                return self.extract_batch_with_vision(screenshots)
+            finally:
+                # 배치 수집 완료 후 브라우저 리소스 정리
+                await self.cleanup()
 
         try:
             loop = asyncio.get_event_loop()
