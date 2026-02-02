@@ -66,7 +66,7 @@ class TraditionalAPISource(DataSourceBase):
         return '.KS' in ticker_code or '.KQ' in ticker_code
 
     def _collect_with_pykrx(self, code: str) -> SupplyDemandData:
-        """pykrx를 사용한 수급 데이터 수집"""
+        """pykrx를 사용한 수급 데이터 수집 (주식/ETF 자동 구분)"""
         result: SupplyDemandData = {}
 
         try:
@@ -75,14 +75,27 @@ class TraditionalAPISource(DataSourceBase):
             end_date = datetime.now().strftime('%Y%m%d')
             start_date = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
 
-            # pykrx 내부 버그로 인한 root logger 에러 억제
-            # pykrx가 logging.info(args, kwargs) 형태로 잘못된 로깅을 함
+            df = None
+
+            # pykrx 내부 버그 대응: 예외 발생 전에 logging.info(args, kwargs) 호출
+            # root logger를 임시로 비활성화하여 불필요한 에러 로그 억제
             root_logger = logging.getLogger()
             original_level = root_logger.level
             root_logger.setLevel(logging.CRITICAL)
 
             try:
-                df = stock.get_market_trading_volume_by_date(start_date, end_date, code)
+                # 1. 먼저 일반 주식으로 시도
+                try:
+                    df = stock.get_market_trading_volume_by_date(start_date, end_date, code)
+                except Exception:
+                    pass
+
+                # 2. 실패하거나 빈 데이터면 ETF로 시도
+                if df is None or df.empty:
+                    try:
+                        df = stock.get_etf_trading_volume_by_date(start_date, end_date, code)
+                    except Exception:
+                        pass
             finally:
                 root_logger.setLevel(original_level)
 
