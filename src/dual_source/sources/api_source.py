@@ -452,8 +452,8 @@ class TraditionalAPISource(DataSourceBase):
             result.update(kis_data)
             logger.debug(f"{ticker_code}: KIS API 성공 (유의미한 데이터)")
 
-        # 2. pykrx 시도 (Fallback 1 - 무료, 안정적)
-        # 주의: pykrx는 ETF에 대해 빈 데이터를 반환하므로 fallback으로 진행
+        # 2. pykrx 시도 (3일 합계 데이터 전용 - 무료, 안정적)
+        # 주의: KIS는 1일 데이터만 제공하므로 pykrx로 3일 합계 보완
         if result.get('foreign_net') is None or result.get('foreign_net') == 0:
             pykrx_data = self._collect_with_pykrx(code)
             pykrx_has_data = (
@@ -461,10 +461,19 @@ class TraditionalAPISource(DataSourceBase):
                 pykrx_data.get('institutional_net') is not None and pykrx_data.get('institutional_net') != 0
             )
             if pykrx_has_data:
-                result.update(pykrx_data)
-                logger.debug(f"{ticker_code}: pykrx 성공")
+                # 3일 합계 데이터만 업데이트 (KIS의 1일 데이터 보존)
+                if pykrx_data.get('foreign_net') is not None:
+                    result['foreign_net'] = pykrx_data['foreign_net']
+                if pykrx_data.get('institutional_net') is not None:
+                    result['institutional_net'] = pykrx_data['institutional_net']
+                # 1일 데이터가 없는 경우에만 pykrx 1일 데이터 사용
+                if result.get('foreign_net_1d') is None and pykrx_data.get('foreign_net_1d') is not None:
+                    result['foreign_net_1d'] = pykrx_data['foreign_net_1d']
+                if result.get('institutional_net_1d') is None and pykrx_data.get('institutional_net_1d') is not None:
+                    result['institutional_net_1d'] = pykrx_data['institutional_net_1d']
+                logger.debug(f"{ticker_code}: pykrx 3일 합계 데이터 보완")
 
-        # 3. KRX API 시도 (Fallback 2)
+        # 3. KRX API 시도 (Fallback 2 - 3일 합계 데이터 보완)
         if result.get('foreign_net') is None or result.get('foreign_net') == 0:
             krx_data = self._collect_with_krx_api(code)
             krx_has_data = (
@@ -472,8 +481,17 @@ class TraditionalAPISource(DataSourceBase):
                 krx_data.get('institutional_net') is not None and krx_data.get('institutional_net') != 0
             )
             if krx_has_data:
-                result.update(krx_data)
-                logger.debug(f"{ticker_code}: KRX API 성공")
+                # 3일 합계 데이터만 업데이트 (기존 1일 데이터 보존)
+                if krx_data.get('foreign_net') is not None:
+                    result['foreign_net'] = krx_data['foreign_net']
+                if krx_data.get('institutional_net') is not None:
+                    result['institutional_net'] = krx_data['institutional_net']
+                # 1일 데이터가 없는 경우에만 KRX 1일 데이터 사용
+                if result.get('foreign_net_1d') is None and krx_data.get('foreign_net_1d') is not None:
+                    result['foreign_net_1d'] = krx_data['foreign_net_1d']
+                if result.get('institutional_net_1d') is None and krx_data.get('institutional_net_1d') is not None:
+                    result['institutional_net_1d'] = krx_data['institutional_net_1d']
+                logger.debug(f"{ticker_code}: KRX API 3일 합계 보완")
 
         # 4. 네이버 크롤링 (최종 폴백 + 교차 검증)
         # ETF의 경우 다른 API가 0을 반환해도 네이버에서 실제 데이터 수집 가능
@@ -490,11 +508,17 @@ class TraditionalAPISource(DataSourceBase):
                 naver_data.get('institutional_net') is not None
             )
             if naver_has_data:
-                # 네이버 데이터로 업데이트 (기존 0 값 덮어쓰기)
-                for key in ['foreign_net', 'institutional_net', 'foreign_net_1d', 'institutional_net_1d']:
+                # 3일 합계 데이터 보완 (기존 0 값 또는 None 덮어쓰기)
+                for key in ['foreign_net', 'institutional_net']:
                     if naver_data.get(key) is not None:
-                        result[key] = naver_data[key]
-                logger.debug(f"{ticker_code}: 네이버 크롤링으로 데이터 보완/대체")
+                        if result.get(key) is None or result.get(key) == 0:
+                            result[key] = naver_data[key]
+                # 1일 데이터는 없는 경우에만 업데이트 (기존 데이터 보존)
+                if result.get('foreign_net_1d') is None and naver_data.get('foreign_net_1d') is not None:
+                    result['foreign_net_1d'] = naver_data['foreign_net_1d']
+                if result.get('institutional_net_1d') is None and naver_data.get('institutional_net_1d') is not None:
+                    result['institutional_net_1d'] = naver_data['institutional_net_1d']
+                logger.debug(f"{ticker_code}: 네이버 크롤링으로 데이터 보완")
 
         # 5. ETF 괴리율
         etf_data = self._collect_etf_data_krx(code)

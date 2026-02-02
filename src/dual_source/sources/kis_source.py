@@ -547,12 +547,9 @@ class KISSource(DataSourceBase):
 
         result = self._parse_supply_demand(output)
 
-        # 3거래일 합계는 단일 API로 불가 → 1일 데이터를 3일 누적 추정
-        # (실제 구현에서는 일별 시세 API를 호출해야 정확)
-        if result.get('foreign_net_1d') is not None:
-            result['foreign_net'] = result['foreign_net_1d']
-        if result.get('institutional_net_1d') is not None:
-            result['institutional_net'] = result['institutional_net_1d']
+        # 주의: KIS 현재가 API는 1일 데이터만 제공
+        # 3거래일 합계(foreign_net, institutional_net)는 설정하지 않음
+        # → pykrx에서 실제 3일 합계 데이터를 제공하도록 함
 
         logger.debug(
             f"KIS {ticker_code}: 외인={result.get('foreign_net_1d')}만주, "
