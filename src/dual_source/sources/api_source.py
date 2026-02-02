@@ -75,9 +75,18 @@ class TraditionalAPISource(DataSourceBase):
             end_date = datetime.now().strftime('%Y%m%d')
             start_date = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
 
-            df = stock.get_market_trading_volume_by_date(start_date, end_date, code)
+            # pykrx 내부 버그로 인한 root logger 에러 억제
+            # pykrx가 logging.info(args, kwargs) 형태로 잘못된 로깅을 함
+            root_logger = logging.getLogger()
+            original_level = root_logger.level
+            root_logger.setLevel(logging.CRITICAL)
 
-            if df.empty:
+            try:
+                df = stock.get_market_trading_volume_by_date(start_date, end_date, code)
+            finally:
+                root_logger.setLevel(original_level)
+
+            if df is None or df.empty:
                 return result
 
             # 최근 3거래일 합계
