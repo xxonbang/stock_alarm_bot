@@ -685,35 +685,162 @@ def get_fred_macro_data() -> str:
         return "[MACRO DATA (Source: Federal Reserve FRED)]\n데이터 수집 실패"
 
 
+def get_koreaexim_exchange_rate() -> Optional[Dict[str, any]]:
+    """
+    한국수출입은행 Open API를 통한 환율 정보 수집 (Primary)
+
+    Returns:
+        {'rate': 매매기준율, 'change_pct': 전일대비등락률} 또는 None
+
+    Note:
+        - 영업일 11:00 갱신
+        - 주말/공휴일에는 데이터 없음 (최근 영업일 조회 필요)
+        - 도메인: oapi.koreaexim.go.kr (2025.06.25 변경)
+    """
+    api_key = os.getenv('KOREAEXIM_API_KEY', 'iiUCA5fWpK1ni8A3BR5JrWk7obCuk5ka')
+
+    if not api_key:
+        logger.debug("한국수출입은행 API 키 미설정")
+        return None
+
+    # 최근 5일 조회 시도 (주말/공휴일 대응)
+    for days_ago in range(5):
+        try:
+            search_date = (datetime.now() - timedelta(days=days_ago)).strftime('%Y%m%d')
+
+            # 신규 도메인 우선, 구 도메인 fallback
+            urls = [
+                f"https://oapi.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey={api_key}&searchdate={search_date}&data=AP01",
+                f"https://www.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey={api_key}&searchdate={search_date}&data=AP01",
+            ]
+
+            for url in urls:
+                try:
+                    if CURL_CFFI_AVAILABLE:
+                        response = requests.get(url, timeout=10, impersonate="chrome120")
+                    else:
+                        import urllib.request
+                        import json as json_lib
+                        req = urllib.request.Request(url)
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            data = json_lib.loads(resp.read().decode('utf-8'))
+                            if data:
+                                for item in data:
+                                    if item.get('cur_unit') == 'USD':
+                                        rate_str = item.get('deal_bas_r', '').replace(',', '')
+                                        if rate_str:
+                                            rate = float(rate_str)
+                                            logger.info(f"한국수출입은행 환율 수집 성공: {rate:,.2f}원 ({search_date})")
+                                            return {'rate': rate, 'change_pct': None, 'source': 'koreaexim', 'date': search_date}
+                            continue
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data and isinstance(data, list) and len(data) > 0:
+                            # USD 환율 찾기
+                            for item in data:
+                                if item.get('cur_unit') == 'USD':
+                                    rate_str = item.get('deal_bas_r', '').replace(',', '')
+                                    if rate_str:
+                                        rate = float(rate_str)
+                                        logger.info(f"한국수출입은행 환율 수집 성공: {rate:,.2f}원 ({search_date})")
+                                        return {'rate': rate, 'change_pct': None, 'source': 'koreaexim', 'date': search_date}
+                except Exception as e:
+                    logger.debug(f"한국수출입은행 API 요청 실패 ({url[:50]}...): {e}")
+                    continue
+
+        except Exception as e:
+            logger.debug(f"한국수출입은행 환율 조회 실패 ({search_date}): {e}")
+            continue
+
+    logger.warning("한국수출입은행 환율 조회 실패 (5일간 데이터 없음)")
+    return None
+
+
 def get_market_indicators() -> str:
     """
     매크로 경제 지표 수집 (FRED API + yfinance + 공포/탐욕 지수)
-    
+
     Returns:
         포맷팅된 매크로 지표 텍스트
     """
     logger.info("=== 매크로 경제 지표 수집 시작 ===")
-    
+
     # Part A: FRED API 데이터 (우선)
     fred_data = get_fred_macro_data()
-    
+
     indicators = []
     vix_value = None  # VIX 값을 저장하여 공포/탐욕 지수 계산에 사용
-    
-    # Part B: yfinance로 수집 가능한 지표들 (FRED 의존성 제거)
+
+    # Part B-1: 환율 수집 (한국수출입은행 Primary → yfinance Fallback)
+    exchange_rate_collected = False
+    koreaexim_data = get_koreaexim_exchange_rate()
+    if koreaexim_data and koreaexim_data.get('rate'):
+        rate = koreaexim_data['rate']
+        # 전일 대비 등락률은 수출입은행 API에서 미제공 → yfinance로 보완 시도
+        change_pct = None
+        try:
+            stock = yf.Ticker('KRW=X')
+            info = stock.info
+            if 'regularMarketChangePercent' in info:
+                change_pct = info['regularMarketChangePercent']
+        except Exception:
+            pass
+
+        change_str = ""
+        if change_pct is not None:
+            sign = "+" if change_pct >= 0 else ""
+            change_str = f" ({sign}{change_pct:.2f}%)"
+
+        indicators.append(f"- USD/KRW 환율: {rate:,.0f}{change_str}")
+        logger.info(f"USD/KRW 환율 수집 완료 (수출입은행): {rate:,.0f}{change_str}")
+        exchange_rate_collected = True
+
+    # 수출입은행 실패 시 yfinance Fallback
+    if not exchange_rate_collected:
+        try:
+            stock = yf.Ticker('KRW=X')
+            info = stock.info
+            current_price = info.get('regularMarketPrice') or info.get('previousClose')
+            if not current_price:
+                hist = stock.history(period="1d")
+                if not hist.empty:
+                    current_price = float(hist['Close'].iloc[-1])
+
+            if current_price:
+                change_pct = info.get('regularMarketChangePercent')
+                if change_pct is None and info.get('previousClose'):
+                    prev_close = info['previousClose']
+                    if prev_close > 0:
+                        change_pct = ((current_price - prev_close) / prev_close) * 100
+
+                change_str = ""
+                if change_pct is not None:
+                    sign = "+" if change_pct >= 0 else ""
+                    change_str = f" ({sign}{change_pct:.2f}%)"
+
+                indicators.append(f"- USD/KRW 환율: {current_price:,.0f}{change_str}")
+                logger.info(f"USD/KRW 환율 수집 완료 (yfinance fallback): {current_price:,.0f}{change_str}")
+                exchange_rate_collected = True
+        except Exception as e:
+            logger.warning(f"USD/KRW 환율 수집 실패 (yfinance fallback): {e}")
+
+    if not exchange_rate_collected:
+        indicators.append("- USD/KRW 환율: N/A")
+
+    # Part B-2: yfinance로 수집 가능한 기타 지표들
     macro_tickers = {
         '^TNX': 'US 10Y Treasury',  # FRED DGS10 대체
         'CL=F': 'WTI 원유',
         'GC=F': '금 선물',
         '^VIX': 'VIX 변동성 지수',
-        'KRW=X': 'USD/KRW 환율',
     }
-    
+
     for ticker, name in macro_tickers.items():
         try:
             stock = yf.Ticker(ticker)
             info = stock.info
-            
+
             # 현재가 조회
             current_price = None
             if 'regularMarketPrice' in info:
@@ -725,7 +852,7 @@ def get_market_indicators() -> str:
                 hist = stock.history(period="1d")
                 if not hist.empty:
                     current_price = float(hist['Close'].iloc[-1])
-            
+
             # 등락률 계산 (전일 대비)
             change_pct = None
             if 'regularMarketChangePercent' in info:
@@ -734,27 +861,25 @@ def get_market_indicators() -> str:
                 prev_close = info['previousClose']
                 if prev_close and prev_close > 0:
                     change_pct = ((current_price - prev_close) / prev_close) * 100
-            
+
             if current_price:
                 # 포맷팅
-                if ticker == 'KRW=X':
-                    price_str = f"{current_price:,.0f}"
-                elif ticker == '^TNX':
+                if ticker == '^TNX':
                     # 10년물 국채는 퍼센트로 표시 (yfinance는 이미 퍼센트 단위)
                     price_str = f"{current_price:.2f}%"
                 elif ticker in ['CL=F', 'GC=F']:
                     price_str = f"${current_price:.2f}"
                 else:
                     price_str = f"{current_price:.2f}"
-                
+
                 change_str = ""
                 if change_pct is not None:
                     sign = "+" if change_pct >= 0 else ""
                     change_str = f" ({sign}{change_pct:.2f}%)"
-                
+
                 indicators.append(f"- {name}: {price_str}{change_str}")
                 logger.info(f"{name} 수집 완료: {price_str}{change_str}")
-                
+
                 # VIX 값 저장 (공포/탐욕 지수 계산에 사용)
                 if ticker == '^VIX' and current_price:
                     vix_value = current_price

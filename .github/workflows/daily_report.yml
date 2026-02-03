@@ -51,6 +51,8 @@ jobs:
           GOOGLE_API_KEY_02: ${{ secrets.GOOGLE_API_KEY_02 }}
           GOOGLE_API_KEY_03: ${{ secrets.GOOGLE_API_KEY_03 }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          # 한국수출입은행 환율 API
+          KOREAEXIM_API_KEY: ${{ secrets.KOREAEXIM_API_KEY }}
           # 한국 주식 API
           KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
           KRX_API_KEY_EXPIRY: ${{ secrets.KRX_API_KEY_EXPIRY }}
