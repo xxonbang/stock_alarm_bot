@@ -123,6 +123,7 @@ class SupabaseCredentialsManager:
             response = self._client.table('api_credentials') \
                 .select('credential_type, credential_value') \
                 .eq('service_name', service_name) \
+                .eq('environment', 'production') \
                 .eq('is_active', True) \
                 .execute()
 
@@ -210,6 +211,7 @@ class SupabaseCredentialsManager:
                 'service_name': 'kis',
                 'credential_type': 'app_key',
                 'credential_value': app_key,
+                'environment': 'production',
                 'is_active': True,
             }, on_conflict='service_name,credential_type,environment').execute()
 
@@ -218,6 +220,7 @@ class SupabaseCredentialsManager:
                 'service_name': 'kis',
                 'credential_type': 'app_secret',
                 'credential_value': app_secret,
+                'environment': 'production',
                 'is_active': True,
             }, on_conflict='service_name,credential_type,environment').execute()
 
@@ -305,6 +308,7 @@ class SupabaseCredentialsManager:
                 'service_name': 'kis',
                 'credential_type': 'access_token',
                 'credential_value': access_token,
+                'environment': 'production',
                 'is_active': True,
             }, on_conflict='service_name,credential_type,environment').execute()
 
@@ -313,6 +317,7 @@ class SupabaseCredentialsManager:
                 'service_name': 'kis',
                 'credential_type': 'token_expires_at',
                 'credential_value': str(expires_at),
+                'environment': 'production',
                 'is_active': True,
             }, on_conflict='service_name,credential_type,environment').execute()
 
@@ -346,12 +351,12 @@ class SupabaseCredentialsManager:
             # access_token 비활성화
             self._client.table('api_credentials').update({
                 'is_active': False,
-            }).eq('service_name', 'kis').eq('credential_type', 'access_token').execute()
+            }).eq('service_name', 'kis').eq('credential_type', 'access_token').eq('environment', 'production').execute()
 
             # token_expires_at 비활성화
             self._client.table('api_credentials').update({
                 'is_active': False,
-            }).eq('service_name', 'kis').eq('credential_type', 'token_expires_at').execute()
+            }).eq('service_name', 'kis').eq('credential_type', 'token_expires_at').eq('environment', 'production').execute()
 
             # 캐시에서 토큰 제거
             if 'kis' in self._cache:
