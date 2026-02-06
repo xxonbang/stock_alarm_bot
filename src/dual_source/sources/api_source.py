@@ -48,6 +48,7 @@ class TraditionalAPISource(DataSourceBase):
         """
         super().__init__()
         self._krx_api_key = krx_api_key
+        self._kis_source = None  # Lazy init, 재사용하여 불필요한 재생성 방지
 
     @property
     def source_name(self) -> str:
@@ -415,13 +416,19 @@ class TraditionalAPISource(DataSourceBase):
             pass
         return None
 
+    def _get_kis_source(self):
+        """KISSource 인스턴스 반환 (Lazy init, 재사용)"""
+        if self._kis_source is None:
+            from .kis_source import KISSource
+            self._kis_source = KISSource()
+        return self._kis_source
+
     def _collect_with_kis(self, ticker_code: str) -> SupplyDemandData:
         """KIS API를 사용한 한국 주식 데이터 수집 (선택적)"""
         result: SupplyDemandData = {}
 
         try:
-            from .kis_source import KISSource
-            kis = KISSource()
+            kis = self._get_kis_source()
             if kis._token_manager.is_configured():
                 result = kis._collect_sync(ticker_code)
                 if result:

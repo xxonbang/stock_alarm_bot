@@ -23,6 +23,7 @@
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -70,6 +71,8 @@ class KISTokenManager:
         self._app_key: Optional[str] = None
         self._app_secret: Optional[str] = None
         self._cache_file_path: Optional[Path] = None
+        self._lock = threading.Lock()
+        self._last_refresh_time: float = 0
         self._initialized = True
 
     def _get_cache_file_path(self) -> Path:
@@ -197,29 +200,34 @@ class KISTokenManager:
         """
         유효한 액세스 토큰 반환 (Supabase 공유 → 파일 캐시 → 신규 발급)
 
-        1. 메모리에 유효한 토큰이 있으면 반환
-        2. Supabase에서 공유 토큰 로드 시도 (여러 프로젝트 간 공유)
-        3. 파일에서 유효한 토큰 로드 시도
-        4. 모두 실패 시 새로 발급 (1일 1회 제한 주의)
+        스레드 안전: Lock + double-check 패턴으로 동시 발급 방지
+        1. Lock 없이 메모리 확인 (빠른 경로)
+        2. Lock 획득 후 전체 캐스케이드 실행
         """
         if not self.is_configured():
             return None
 
-        # 1. 메모리 토큰 확인 (만료 5분 전 갱신)
+        # 1. Lock 없이 메모리 확인 (빠른 경로 - 대부분 여기서 반환)
         if self._access_token and time.time() < (self._token_expires_at - 300):
             return self._access_token
 
-        # 2. Supabase에서 공유 토큰 로드 시도
-        if self._load_token_from_supabase():
-            return self._access_token
+        # 2. Lock 획득 후 전체 캐스케이드 (동시 발급 방지)
+        with self._lock:
+            # Double-check: 다른 스레드가 이미 토큰을 갱신했을 수 있음
+            if self._access_token and time.time() < (self._token_expires_at - 300):
+                return self._access_token
 
-        # 3. 파일에서 토큰 로드 시도
-        if self._load_token_from_file():
-            return self._access_token
+            # Supabase에서 공유 토큰 로드 시도
+            if self._load_token_from_supabase():
+                return self._access_token
 
-        # 4. 새 토큰 발급 (주의: 1일 1회 제한)
-        logger.info("🔄 KIS 토큰 신규 발급 시도 (1일 1회 제한 주의)")
-        return self._refresh_token()
+            # 파일에서 토큰 로드 시도
+            if self._load_token_from_file():
+                return self._access_token
+
+            # 새 토큰 발급 (주의: 1일 1회 제한)
+            logger.info("🔄 KIS 토큰 신규 발급 시도 (1일 1회 제한 주의)")
+            return self._refresh_token()
 
     def _load_token_from_supabase(self) -> bool:
         """
@@ -254,13 +262,30 @@ class KISTokenManager:
             logger.debug(f"Supabase 토큰 로드 실패: {e}")
             return False
 
+    # 토큰 발급 최소 간격 (초) - 동일 프로세스 내 중복 발급 방지
+    _REFRESH_COOLDOWN = 30
+
     def _refresh_token(self) -> Optional[str]:
         """
         토큰 발급/갱신
 
         주의: 한국투자증권 API는 1일 1회 토큰 발급 제한이 있습니다.
         발급 성공 시 파일 및 Supabase에 저장하여 여러 프로젝트에서 공유합니다.
+
+        스레드 안전: 이 메서드는 반드시 self._lock 내부에서 호출되어야 합니다.
         """
+        # 쿨다운 체크: 최근 발급 이력이 있으면 다른 소스 재확인 후 차단
+        now = time.time()
+        if self._last_refresh_time and (now - self._last_refresh_time) < self._REFRESH_COOLDOWN:
+            elapsed = now - self._last_refresh_time
+            logger.warning(f"⚠️ KIS 토큰 {elapsed:.0f}초 전에 발급됨, 재발급 대신 캐시 재확인")
+            if self._load_token_from_supabase():
+                return self._access_token
+            if self._load_token_from_file():
+                return self._access_token
+            logger.error(f"❌ KIS 토큰 발급 쿨다운 중 ({self._REFRESH_COOLDOWN}초), 캐시에도 없음")
+            return None
+
         try:
             url = f"{self.BASE_URL}/oauth2/tokenP"
             payload = {
@@ -274,9 +299,12 @@ class KISTokenManager:
 
             if response.status_code == 200:
                 data = response.json()
-                self._access_token = data.get("access_token")
                 expires_in = int(data.get("expires_in", 86400))  # 기본 24시간
+
+                # expires_at를 먼저 설정 (Lock 밖에서 읽는 스레드가 불일치 값을 보지 않도록)
                 self._token_expires_at = time.time() + expires_in
+                self._access_token = data.get("access_token")
+                self._last_refresh_time = time.time()
 
                 logger.info(f"✅ KIS 토큰 발급 성공 (유효기간: {expires_in // 3600}시간)")
 
@@ -323,21 +351,27 @@ class KISTokenManager:
             return False
 
     def invalidate(self):
-        """토큰 무효화 (토큰 만료 감지 시 호출)"""
-        self._access_token = None
-        self._token_expires_at = 0
-        self._delete_cache_file()
+        """토큰 무효화 (토큰 만료 감지 시 호출, 스레드 안전)"""
+        with self._lock:
+            # 이미 무효화된 상태면 중복 작업 방지
+            if self._access_token is None and self._token_expires_at == 0:
+                logger.debug("KIS 토큰 이미 무효화 상태, 스킵")
+                return
 
-        # Supabase에서도 토큰 무효화 (다른 프로젝트에서 새 토큰 발급 유도)
-        try:
-            from config.supabase_credentials import get_supabase_credentials_manager
-            creds_manager = get_supabase_credentials_manager()
-            if creds_manager.is_supabase_available:
-                creds_manager.invalidate_kis_token()
-        except Exception as e:
-            logger.debug(f"Supabase 토큰 무효화 실패: {e}")
+            self._access_token = None
+            self._token_expires_at = 0
+            self._delete_cache_file()
 
-        logger.info("🔄 KIS 토큰 무효화됨 (로컬 캐시 + Supabase 삭제, 재발급 필요)")
+            # Supabase에서도 토큰 무효화 (다른 프로젝트에서 새 토큰 발급 유도)
+            try:
+                from config.supabase_credentials import get_supabase_credentials_manager
+                creds_manager = get_supabase_credentials_manager()
+                if creds_manager.is_supabase_available:
+                    creds_manager.invalidate_kis_token()
+            except Exception as e:
+                logger.debug(f"Supabase 토큰 무효화 실패: {e}")
+
+            logger.info("🔄 KIS 토큰 무효화됨 (로컬 캐시 + Supabase 삭제, 재발급 필요)")
 
     @property
     def app_key(self) -> Optional[str]:
