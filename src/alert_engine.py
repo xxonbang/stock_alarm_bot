@@ -164,7 +164,6 @@ def generate_normal_message(
     us10y: Optional[float] = None,
     nq_change_pct: Optional[float] = None,
     is_evening: bool = False,
-    ai_perf_text: str = "",
 ) -> List[str]:
     """
     평시 메시지 생성 (1개 메시지, AI 호출 없음)
@@ -301,11 +300,6 @@ def generate_normal_message(
     else:
         lines.append("💡 오늘 하루 수고하셨습니다. 내일도 좋은 장이 되길 바랍니다.")
 
-    # 저녁에만 AI 성과
-    if is_evening and ai_perf_text:
-        lines.append("")
-        lines.append(ai_perf_text)
-
     return ["\n".join(lines)]
 
 
@@ -433,7 +427,6 @@ def generate_weekly_messages(
     ai_detailed: str = "",
     theme_text: str = "",
     signal_text: str = "",
-    perf_text: str = "",
     fear_greed_score: Optional[float] = None,
     vix_value: Optional[float] = None,
     usdkrw: Optional[float] = None,
@@ -547,21 +540,12 @@ def generate_weekly_messages(
                 msg2_lines.append(line)
         msg2_lines.append("")
 
-    if perf_text:
-        msg2_lines.append("<b>AI 추천 성과</b>")
-        for line in perf_text.split("\n"):
-            if line.startswith("["):
-                continue
-            if line.strip():
-                msg2_lines.append(line)
-        msg2_lines.append("")
-
     if ai_detailed:
         msg2_lines.append("━━ 🤖 AI 주간 분석 ━━")
         msg2_lines.append("")
         msg2_lines.append(ai_detailed)
 
-    if not any([theme_text, signal_text, perf_text, ai_detailed]):
+    if not any([theme_text, signal_text, ai_detailed]):
         msg2_lines.append("이번 주 크로스 프로젝트 데이터가 아직 없습니다.")
         msg2_lines.append("theme_analysis, signal_analysis 실행 후 다시 확인해 주세요.")
 

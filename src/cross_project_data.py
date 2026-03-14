@@ -218,10 +218,6 @@ def get_enriched_data_for_ai() -> str:
     if signal_text:
         blocks.append(signal_text)
 
-    perf_text = get_paper_trading_text()
-    if perf_text:
-        blocks.append(perf_text)
-
     if not blocks:
         logger.info("크로스 프로젝트 데이터 없음 (정상 - 다른 프로젝트 미실행)")
         return ""

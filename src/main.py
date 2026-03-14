@@ -40,7 +40,7 @@ from src.analysis import get_tradingview_technical_summary
 from src.ai_researcher import create_researcher
 from src.notifier import create_notifier
 from src.alert_engine import determine_mode, generate_normal_message, generate_alert_messages, generate_weekly_messages
-from src.cross_project_data import get_enriched_data_for_ai, get_theme_forecast_text, get_cross_validated_signals_text, get_paper_trading_text
+from src.cross_project_data import get_enriched_data_for_ai, get_theme_forecast_text, get_cross_validated_signals_text
 
 # 테스트 모드 확인
 TEST_MODE = os.getenv('TEST_MODE', 'false').lower() == 'true' or '--test' in sys.argv
@@ -235,11 +235,6 @@ def main():
             # === 평시 모드: AI 호출 없음 ===
             logger.info("\n[Step 3] 평시 모드 — AI 호출 없이 메시지 생성")
 
-            # AI 성과 텍스트 (저녁에만)
-            ai_perf_text = ""
-            if is_evening:
-                ai_perf_text = get_paper_trading_text()
-
             messages = generate_normal_message(
                 stock_results=stock_results,
                 macro_text=macro_indicators,
@@ -249,7 +244,6 @@ def main():
                 us10y=us10y,
                 nq_change_pct=nq_change_pct,
                 is_evening=is_evening,
-                ai_perf_text=ai_perf_text,
             )
 
         elif mode == 'alert':
@@ -355,10 +349,9 @@ def main():
             researcher = create_researcher()
             _, detailed_briefing, token_usage = researcher.generate_briefing(collected_data)
 
-            # 테마/시그널/성과 텍스트
+            # 테마/시그널 텍스트
             theme_text = get_theme_forecast_text()
             signal_text = get_cross_validated_signals_text()
-            perf_text = get_paper_trading_text()
 
             messages = generate_weekly_messages(
                 stock_results=stock_results,
@@ -366,7 +359,6 @@ def main():
                 ai_detailed=detailed_briefing,
                 theme_text=theme_text,
                 signal_text=signal_text,
-                perf_text=perf_text,
                 fear_greed_score=fear_greed_score,
                 vix_value=vix_value,
                 usdkrw=usdkrw,
