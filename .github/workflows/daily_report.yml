@@ -2,9 +2,13 @@ name: Daily Stock Report
 
 on:
   schedule:
-    # 하루 2회 발송
+    # 하루 4회 발송
     # KST 08:00 -> UTC 23:00 (전날)
     - cron: "0 23 * * *"
+    # KST 10:30 -> UTC 01:30 (장중 수급 속보 1차, theme_analysis 10:01 데이터)
+    - cron: "30 1 * * 1-5"
+    # KST 13:50 -> UTC 04:50 (장중 수급 속보 2차, theme_analysis 13:21 데이터)
+    - cron: "50 4 * * 1-5"
     # KST 22:00 -> UTC 13:00
     - cron: "0 13 * * *"
   workflow_dispatch: # 수동 실행도 가능

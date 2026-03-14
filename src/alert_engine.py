@@ -3,7 +3,8 @@
 수집된 데이터를 기반으로 평시/경보/주간 모드를 결정하고
 각 모드에 맞는 텔레그램 메시지를 생성
 
-3모드 시스템:
+4모드 시스템:
+- 장중 (intraday): 장중 수급 속보. AI 호출 없음.
 - 평시 (normal): 짧은 현황 메시지. AI 호출 없음.
 - 경보 (alert): 임계값 돌파 시. AI가 상황 해석.
 - 주간 (weekly): 월요일 아침. 구조적 점검 + AI 분석.
@@ -554,6 +555,114 @@ def generate_weekly_messages(
         messages.append("\n".join(msg2_lines))
 
     return messages
+
+
+def generate_intraday_message(intraday_data: Dict) -> List[str]:
+    """
+    장중 수급 속보 메시지 생성 (1개 메시지, AI 호출 없음)
+
+    Args:
+        intraday_data: cross_project_data.get_intraday_investor_data()의 반환값
+    """
+    now = datetime.now(KST)
+    date_str = now.strftime("%Y.%m.%d")
+    weekday_map = {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
+    weekday = weekday_map.get(now.weekday(), "")
+    time_str = now.strftime("%H:%M")
+
+    data_time = intraday_data.get("time", "")
+    data_date = intraday_data.get("date", "")
+    stocks = intraday_data.get("stocks", {})
+    prev_stocks = intraday_data.get("prev_stocks", {})
+    prev_time = intraday_data.get("prev_time")
+
+    lines = []
+    lines.append(f"📅 {date_str} ({weekday}) {time_str} KST")
+    lines.append("")
+    lines.append(f"📊 <b>장중 수급 속보</b> ({data_time} 기준)")
+    lines.append("")
+
+    for code, info in stocks.items():
+        name = info.get("name", code)
+        price = info.get("current_price")
+        change_rate = info.get("change_rate")
+        foreign = info.get("foreign_net")
+        institution = info.get("institution_net")
+        program = info.get("program_net")
+
+        lines.append(f"━━ <b>{name}({code})</b> ━━")
+        lines.append("")
+
+        # 현재가 + 등락률
+        if price is not None:
+            price_str = f"{price:,.0f}원"
+            if change_rate is not None:
+                cr_emoji = "🔴" if change_rate >= 0 else "🔵"
+                lines.append(f"💰 현재가: <b>{price_str}</b> ({cr_emoji}{change_rate:+.2f}%)")
+            else:
+                lines.append(f"💰 현재가: <b>{price_str}</b>")
+
+        # 수급 현황
+        lines.append("")
+        lines.append("🏦 <b>수급 현황</b> (장중 추정치)")
+
+        if foreign is not None:
+            f_sign = "+" if foreign >= 0 else ""
+            f_man = foreign / 10000  # 주 → 만주
+            f_emoji = "📈" if foreign > 0 else "📉" if foreign < 0 else "➖"
+            lines.append(f"  {f_emoji} 외국인: <b>{f_sign}{f_man:,.1f}만주</b>")
+
+        if institution is not None:
+            i_sign = "+" if institution >= 0 else ""
+            i_man = institution / 10000
+            i_emoji = "📈" if institution > 0 else "📉" if institution < 0 else "➖"
+            lines.append(f"  {i_emoji} 기관: <b>{i_sign}{i_man:,.1f}만주</b>")
+
+        if program is not None:
+            p_sign = "+" if program >= 0 else ""
+            p_man = program / 10000
+            lines.append(f"  🤖 프로그램: {p_sign}{p_man:,.1f}만주")
+
+        # 쌍끌이 판단
+        if foreign is not None and institution is not None:
+            if foreign > 0 and institution > 0:
+                lines.append("")
+                lines.append("  🔥 <b>외국인+기관 동시 매수 중!</b> (쌍끌이)")
+            elif foreign < 0 and institution < 0:
+                lines.append("")
+                lines.append("  ⚠️ 외국인+기관 동시 매도 중")
+
+        # 이전 라운드 대비 변화 (추이)
+        prev = prev_stocks.get(code)
+        if prev and prev_time:
+            lines.append("")
+            lines.append(f"📈 <b>추이</b> ({prev_time} → {data_time})")
+
+            changes = []
+            if foreign is not None and prev.get("foreign_net") is not None:
+                f_diff = (foreign - prev["foreign_net"]) / 10000
+                f_dir = "매수 증가 📈" if f_diff > 0 else "매도 증가 📉" if f_diff < 0 else "변동 없음"
+                changes.append(f"  외국인: {f_dir} ({f_diff:+,.1f}만주)")
+
+            if institution is not None and prev.get("institution_net") is not None:
+                i_diff = (institution - prev["institution_net"]) / 10000
+                i_dir = "매수 증가 📈" if i_diff > 0 else "매도 증가 📉" if i_diff < 0 else "변동 없음"
+                changes.append(f"  기관: {i_dir} ({i_diff:+,.1f}만주)")
+
+            if prev.get("current_price") is not None and price is not None:
+                p_diff = price - prev["current_price"]
+                p_pct = (p_diff / prev["current_price"]) * 100 if prev["current_price"] else 0
+                changes.append(f"  가격: {price:,.0f}원 ({p_pct:+.2f}%)")
+
+            for c in changes:
+                lines.append(c)
+
+        lines.append("")
+
+    # 마무리 멘트
+    lines.append("💡 장중 추정치이며, 확정 데이터는 장 마감 후 저녁 리포트에서 확인하실 수 있습니다.")
+
+    return ["\n".join(lines)]
 
 
 def _fear_greed_label(score: float) -> str:

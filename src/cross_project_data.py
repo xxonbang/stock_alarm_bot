@@ -21,7 +21,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 
 THEME_ANALYSIS_DATA_PATH = Path(os.getenv(
     'THEME_ANALYSIS_DATA_PATH',
-    str(_PROJECT_ROOT.parent / 'theme_analysis' / 'frontend' / 'dist' / 'data')
+    str(_PROJECT_ROOT.parent / 'theme_analysis' / 'frontend' / 'public' / 'data')
 ))
 SIGNAL_ANALYSIS_DATA_PATH = Path(os.getenv(
     'SIGNAL_ANALYSIS_DATA_PATH',
@@ -198,6 +198,131 @@ def get_paper_trading_text() -> str:
         emoji = "🟢" if rate >= 0 else "🔴"
         lines.append(f"{p['date']}: {emoji}{rate:+.1f}% ({p['win']}승 {p['loss']}패)")
     return "\n".join(lines)
+
+
+def get_intraday_investor_data(tickers: List[str], target_round: str = None) -> Optional[Dict]:
+    """
+    theme_analysis의 investor-intraday.json에서 장중 수급 데이터 로드
+
+    Args:
+        tickers: 티커 리스트 (예: ['000660.KS'])
+        target_round: 읽을 라운드 시간 (예: '10:01', '13:21')
+                      None이면 가장 최근 라운드 반환
+
+    Returns:
+        {
+            'date': '2026-03-14',
+            'time': '10:01',
+            'round': 2,
+            'stocks': {
+                '000660': {
+                    'foreign_net': -262000,
+                    'institution_net': -85000,
+                    'program_net': -209200,
+                    'current_price': 906000,
+                    'change_rate': -2.58,
+                    'name': 'SK하이닉스'
+                }
+            }
+        }
+        또는 None
+    """
+    data = _load_json(THEME_ANALYSIS_DATA_PATH / "investor-intraday.json")
+    if not data:
+        return None
+
+    snapshots = data.get("snapshots", [])
+    if not snapshots:
+        return None
+
+    # 타겟 라운드 찾기
+    snapshot = None
+    if target_round:
+        for s in snapshots:
+            if s.get("time") == target_round:
+                snapshot = s
+                break
+        # 정확히 일치하는 라운드가 없으면 가장 가까운 이전 라운드
+        if not snapshot:
+            for s in reversed(snapshots):
+                if s.get("time", "99:99") <= target_round:
+                    snapshot = s
+                    break
+    else:
+        # 가장 최근 라운드
+        snapshot = snapshots[-1]
+
+    if not snapshot:
+        return None
+
+    # 티커에서 종목코드 추출 (000660.KS → 000660)
+    codes = []
+    for t in tickers:
+        code = t.replace('.KS', '').replace('.KQ', '')
+        # 6자리 숫자 패딩
+        if len(code) < 6 and code.isdigit():
+            code = code.zfill(6)
+        codes.append((t, code))
+
+    snapshot_data = snapshot.get("data", {})
+    stocks = {}
+
+    # latest.json에서 종목명 가져오기
+    latest = _load_json(THEME_ANALYSIS_DATA_PATH / "latest.json")
+    investor_data = latest.get("investor_data", {}) if latest else {}
+
+    for ticker, code in codes:
+        stock_info = snapshot_data.get(code)
+        if not stock_info:
+            continue
+
+        name = None
+        if code in investor_data:
+            name = investor_data[code].get("name")
+        if not name:
+            from config.ticker_names import get_ticker_name
+            name = get_ticker_name(ticker) or code
+
+        stocks[code] = {
+            "foreign_net": stock_info.get("f"),
+            "institution_net": stock_info.get("i"),
+            "program_net": stock_info.get("pg"),
+            "current_price": stock_info.get("cp"),
+            "change_rate": stock_info.get("cr"),
+            "name": name,
+        }
+
+    if not stocks:
+        return None
+
+    # 이전 라운드 데이터도 함께 반환 (추이 비교용)
+    prev_snapshot = None
+    current_idx = snapshots.index(snapshot)
+    if current_idx > 0:
+        prev_snapshot = snapshots[current_idx - 1]
+
+    prev_stocks = {}
+    if prev_snapshot:
+        prev_data = prev_snapshot.get("data", {})
+        for ticker, code in codes:
+            prev_info = prev_data.get(code)
+            if prev_info:
+                prev_stocks[code] = {
+                    "foreign_net": prev_info.get("f"),
+                    "institution_net": prev_info.get("i"),
+                    "program_net": prev_info.get("pg"),
+                    "current_price": prev_info.get("cp"),
+                    "change_rate": prev_info.get("cr"),
+                }
+
+    return {
+        "date": data.get("date", ""),
+        "time": snapshot.get("time", ""),
+        "round": snapshot.get("round"),
+        "stocks": stocks,
+        "prev_time": prev_snapshot.get("time") if prev_snapshot else None,
+        "prev_stocks": prev_stocks,
+    }
 
 
 def get_enriched_data_for_ai() -> str:

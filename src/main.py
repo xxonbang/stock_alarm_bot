@@ -39,8 +39,8 @@ from src.crawler import (
 from src.analysis import get_tradingview_technical_summary
 from src.ai_researcher import create_researcher
 from src.notifier import create_notifier
-from src.alert_engine import determine_mode, generate_normal_message, generate_alert_messages, generate_weekly_messages
-from src.cross_project_data import get_enriched_data_for_ai, get_theme_forecast_text, get_cross_validated_signals_text
+from src.alert_engine import determine_mode, generate_normal_message, generate_alert_messages, generate_weekly_messages, generate_intraday_message
+from src.cross_project_data import get_enriched_data_for_ai, get_theme_forecast_text, get_cross_validated_signals_text, get_intraday_investor_data
 
 # 테스트 모드 확인
 TEST_MODE = os.getenv('TEST_MODE', 'false').lower() == 'true' or '--test' in sys.argv
@@ -150,15 +150,75 @@ def main():
         elif should_skip and IS_MANUAL_RUN:
             logger.info(f"📅 {skip_reason} (수동 실행이므로 계속 진행)")
 
-        # 저녁 여부 판단
+        # 시간대 판단
         KST = ZoneInfo("Asia/Seoul")
         now_kst = datetime.now(KST)
         is_evening = now_kst.hour >= 18
+        current_hour = now_kst.hour
+        current_minute = now_kst.minute
+
+        # 장중 수급 속보 모드 판단 (10:30, 13:50 실행)
+        # theme_analysis가 10:01/13:21에 수급 수집 → 이 프로그램은 10:30/13:50에 읽어서 전송
+        is_intraday = (
+            (current_hour == 10 and 20 <= current_minute <= 45) or
+            (current_hour == 13 and 40 <= current_minute <= 59)
+        )
+
+        # 장중 모드에서 사용할 타겟 라운드 (theme_analysis 수집 시간 기준)
+        intraday_target_round = None
+        if is_intraday:
+            if current_hour == 10:
+                intraday_target_round = "10:01"
+            elif current_hour == 13:
+                intraday_target_round = "13:21"
 
         logger.info(f"설정 로드: 관심종목 {len(settings.tickers)}개")
+        if is_intraday:
+            logger.info(f"📊 장중 수급 속보 모드 (타겟 라운드: {intraday_target_round})")
 
         # ================================
-        # Step 1: 데이터 수집
+        # 장중 수급 속보 모드 (별도 경로)
+        # ================================
+        if is_intraday and not TEST_MODE:
+            logger.info("\n[장중 모드] theme_analysis 수급 데이터 로드...")
+
+            all_tickers = (
+                settings.tickers_possession_domestic +
+                settings.tickers_possession_overseas +
+                settings.tickers_interest_domestic +
+                settings.tickers_interest_overseas
+            )
+            # 국내 종목만 필터 (수급 데이터는 국내만)
+            domestic_tickers = [t for t in all_tickers if '.KS' in t or '.KQ' in t]
+
+            if not domestic_tickers:
+                logger.info("국내 종목 없음 — 장중 수급 속보 스킵")
+                return
+
+            intraday_data = get_intraday_investor_data(domestic_tickers, target_round=intraday_target_round)
+
+            if not intraday_data or not intraday_data.get("stocks"):
+                logger.warning("장중 수급 데이터 없음 — theme_analysis 미실행 가능성")
+                logger.info("장중 수급 속보 스킵")
+                return
+
+            logger.info(f"장중 수급 데이터 로드 완료: {len(intraday_data['stocks'])}개 종목, {intraday_data['time']} 라운드")
+
+            messages = generate_intraday_message(intraday_data)
+
+            # 텔레그램 발송
+            notifier = create_notifier(settings.telegram_token, settings.chat_id)
+            for msg in messages:
+                if notifier.send_message(msg):
+                    logger.info("✅ 장중 수급 속보 발송 성공")
+                else:
+                    logger.error("❌ 장중 수급 속보 발송 실패")
+
+            logger.info("Stock Insight Bot 완료 (장중 수급 속보)")
+            return
+
+        # ================================
+        # Step 1: 데이터 수집 (일반 모드)
         # ================================
 
         # 1-1: 듀얼 소스 배치 수집
