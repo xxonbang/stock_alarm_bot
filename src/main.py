@@ -280,7 +280,7 @@ def main():
         now = datetime.now(kst)
         date_time_str = now.strftime("%Y년 %m월 %d일 %H시 %M분")
         
-        # 메시지 발송 순서: 바리케이트 -> 각 티커 카테고리 -> 매크로 지표 -> 뉴스 -> AI 인사이트
+        # 메시지 발송 순서: 종목 카테고리 -> 매크로 지표 -> AI 컴팩트 인사이트
         messages_sent = 0
         messages_failed = 0
         
@@ -343,25 +343,14 @@ KRX Data Marketplace에서 인증키 상태를 확인하고 갱신해 주세요.
         except Exception as e:
             logger.debug(f"KRX API 상태 확인 실패: {e}")
         
-        # 0. 바리케이트 메시지 전송 (이전 메시지 뭉치와 구분) - 일자 정보 포함
-        # 듀얼 소스 상태 확인
-        data_source_status = "🔄 듀얼 소스 (Agentic + API 병렬 수집)" if settings.use_dual_source else "📡 기존 방식 (순차 API 수집)"
+        # 리포트 헤더 생성 (첫 번째 메시지에 prepend)
+        token_info_text = ""
+        if token_usage and token_usage.get('total_tokens', 0) > 0:
+            total_tokens = token_usage.get('total_tokens', 0)
+            token_info_text = f" | 💾 토큰: {total_tokens:,}개"
+        report_header = f"📅 {date_time_str} (KST){token_info_text}"
+        header_prepended = False
 
-        barrier_message = f"""<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
-<b>🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧</b>
-<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
-<b>📅 리포트 생성 시간: {date_time_str} (KST)</b>
-<b>📊 새로운 리포트 시작</b>
-<b>{data_source_status}</b>
-<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>"""
-        
-        if notifier.send_message(barrier_message):
-            messages_sent += 1
-            logger.info("✅ 바리케이트 메시지 발송 성공")
-        else:
-            messages_failed += 1
-            logger.error("❌ 바리케이트 메시지 발송 실패")
-        
         # KRX API 경고 메시지 발송 (있는 경우만)
         if krx_warning_message:
             if notifier.send_message(krx_warning_message):
@@ -382,6 +371,9 @@ KRX Data Marketplace에서 인증키 상태를 확인하고 갱신해 주세요.
         for category_key, category_name in category_order:
             if category_key in stock_summaries and stock_summaries[category_key]:
                 message = stock_summaries[category_key]
+                if not header_prepended:
+                    message = f"{report_header}\n\n{message}"
+                    header_prepended = True
                 if notifier.send_message(message):
                     messages_sent += 1
                     logger.info(f"✅ {category_name} 메시지 발송 성공")
@@ -394,6 +386,9 @@ KRX Data Marketplace에서 인증키 상태를 확인하고 갱신해 주세요.
         if not macro_indicators_html.startswith("<b>"):
             macro_indicators_html = f"<b>📈 매크로 경제 지표</b>\n{macro_indicators_html}"
         macro_message = macro_indicators_html
+        if not header_prepended:
+            macro_message = f"{report_header}\n\n{macro_message}"
+            header_prepended = True
         if notifier.send_message(macro_message):
             messages_sent += 1
             logger.info("✅ 매크로 경제 지표 메시지 발송 성공")
@@ -401,34 +396,7 @@ KRX Data Marketplace에서 인증키 상태를 확인하고 갱신해 주세요.
             messages_failed += 1
             logger.error("❌ 매크로 경제 지표 메시지 발송 실패")
         
-        # 3. 주요 시장 뉴스 메시지 전송
-        news_formatted_html = news_formatted.replace("**주요 시장 뉴스 헤드라인:**", "<b>📰 주요 시장 뉴스 (제목+요약)</b>")
-        news_formatted_html = news_formatted_html.replace("**주요 시장 뉴스 (제목+요약):**", "<b>📰 주요 시장 뉴스 (제목+요약)</b>")
-        if not news_formatted_html.startswith("<b>"):
-            news_formatted_html = f"<b>📰 주요 시장 뉴스 (제목+요약)</b>\n{news_formatted_html}"
-        news_message = news_formatted_html
-        if notifier.send_message(news_message):
-            messages_sent += 1
-            logger.info("✅ 주요 시장 뉴스 메시지 발송 성공")
-        else:
-            messages_failed += 1
-            logger.error("❌ 주요 시장 뉴스 메시지 발송 실패")
-        
-        # 3-1. Hot/인기 뉴스 메시지 전송
-        hot_news_formatted_html = hot_news_formatted.replace("**🌎 해외시장 Hot 뉴스:**", "<b>🔥 해외시장 Hot 뉴스</b>")
-        hot_news_formatted_html = hot_news_formatted_html.replace("**🇰🇷 국내시장 Hot 뉴스:**", "<b>🔥 국내시장 Hot 뉴스</b>")
-        if not hot_news_formatted_html.startswith("<b>"):
-            hot_news_formatted_html = f"<b>🔥 Hot/인기 뉴스</b>\n{hot_news_formatted_html}"
-        hot_news_message = hot_news_formatted_html
-        if notifier.send_message(hot_news_message):
-            messages_sent += 1
-            logger.info("✅ Hot/인기 뉴스 메시지 발송 성공")
-        else:
-            messages_failed += 1
-            logger.error("❌ Hot/인기 뉴스 메시지 발송 실패")
-        
-        # 4. AI 투자 인사이트 메시지 전송 (Compact 먼저, 그 다음 Detailed)
-        # 4-1. Compact 리포트 전송
+        # 3. AI 투자 인사이트 메시지 전송 (Compact)
         if compact_briefing:
             compact_briefing_html = f"<b>📱 AI 투자 인사이트 (Compact)</b>\n{compact_briefing}"
             compact_message = compact_briefing_html
@@ -438,47 +406,6 @@ KRX Data Marketplace에서 인증키 상태를 확인하고 갱신해 주세요.
             else:
                 messages_failed += 1
                 logger.error("❌ AI 투자 인사이트 (Compact) 메시지 발송 실패")
-        
-        # 4-2. 구분선 메시지 전송
-        separator_message = "<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n<b>📊 상세 분석 리포트</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>"
-        if notifier.send_message(separator_message):
-            messages_sent += 1
-            logger.info("✅ AI 리포트 구분선 메시지 발송 성공")
-        else:
-            messages_failed += 1
-            logger.error("❌ AI 리포트 구분선 메시지 발송 실패")
-        
-        # 4-3. Detailed 리포트 전송
-        if detailed_briefing:
-            detailed_briefing_html = f"<b>🤖 AI 투자 인사이트 (Detailed)</b>\n{detailed_briefing}"
-            detailed_message = detailed_briefing_html
-            if notifier.send_message(detailed_message):
-                messages_sent += 1
-                logger.info("✅ AI 투자 인사이트 (Detailed) 메시지 발송 성공")
-            else:
-                messages_failed += 1
-                logger.error("❌ AI 투자 인사이트 (Detailed) 메시지 발송 실패")
-        
-        # 5. 바리케이트 메시지 전송 (메시지 뭉치 종료 표시) - 토큰 사용량 정보 포함
-        token_info_text = ""
-        if token_usage and token_usage.get('total_tokens', 0) > 0:
-            prompt_tokens = token_usage.get('prompt_tokens', 0)
-            completion_tokens = token_usage.get('completion_tokens', 0)
-            total_tokens = token_usage.get('total_tokens', 0)
-            token_info_text = f"\n<b>💾 LLM 토큰 사용량:</b> 입력 {prompt_tokens:,}개, 출력 {completion_tokens:,}개, 총 {total_tokens:,}개"
-        
-        barrier_end_message = f"""<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
-<b>🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧</b>
-<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>
-<b>📊 리포트 종료</b>{token_info_text}
-<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>"""
-        
-        if notifier.send_message(barrier_end_message):
-            messages_sent += 1
-            logger.info("✅ 바리케이트 종료 메시지 발송 성공")
-        else:
-            messages_failed += 1
-            logger.error("❌ 바리케이트 종료 메시지 발송 실패")
         
         # 최종 결과
         if messages_failed == 0:

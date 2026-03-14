@@ -960,30 +960,18 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 else:
                     price_str = str(current_price)
                 
-                # 상태 이모지 결정 (종목 헤더용)
+                # 상태 이모지 결정 (이상 시에만 특수 이모지)
                 rsi = technical.get('rsi')
-                ma_deviation = technical.get('ma_deviation')
-                ma_disparity = technical.get('ma_disparity')
                 pullback_status = technical.get('pullback_status')
-                
-                status_emoji = "[해당없음]"
+
                 if pullback_status and '눌림목' in pullback_status:
-                    status_emoji = "[✅눌림목]"
-                elif rsi is not None:
-                    if rsi >= 70:
-                        status_emoji = "[🔥과열]"
-                    elif rsi <= 30:
-                        status_emoji = "[❄️침체]"
-                elif ma_deviation is not None:
-                    if ma_deviation > 105:
-                        status_emoji = "[🔥과열]"
-                    elif ma_deviation < 95:
-                        status_emoji = "[❄️침체]"
-                elif ma_disparity is not None:
-                    if ma_disparity > 105:
-                        status_emoji = "[🔥과열]"
-                    elif ma_disparity < 95:
-                        status_emoji = "[❄️침체]"
+                    line1_emoji = "✅"
+                elif rsi is not None and rsi >= 70:
+                    line1_emoji = "🔥"
+                elif rsi is not None and rsi <= 30:
+                    line1_emoji = "❄️"
+                else:
+                    line1_emoji = "📊"
                 
                 # 1일 변동률 추출 및 이모지 결정
                 one_day_return = None
@@ -1023,208 +1011,62 @@ def format_stock_summary_by_category(category_results: Dict) -> Dict[str, str]:
                 else:
                     main_returns_str = ""
                 
-                # 기술적 지표 초압축 포맷 (R:RSI, D:이격도, 52주:위치%)
-                technical_parts = []
-                
-                # RSI: R55 형식
-                if rsi is not None:
-                    technical_parts.append(f"<code>RSI:{int(rsi)}</code>")
-                
-                # 이격도: D101 형식 (ma_deviation 우선)
-                deviation_value = ma_deviation if ma_deviation is not None else ma_disparity
-                if deviation_value is not None:
-                    technical_parts.append(f"<code>이격:{int(deviation_value)}</code>")
-                
-                # 52주 위치: 52주:98% 형식
-                year_high_pos = technical.get('year_high_pos')
-                if year_high_pos is not None:
-                    technical_parts.append(f"| <code>52주:{int(year_high_pos)}%</code>")
-
-                # MACD 추세 표시
-                macd_trend = technical.get('macd_trend')
-                if macd_trend is not None:
-                    technical_parts.append(f"| <code>MACD:{macd_trend}</code>")
-
-                if technical_parts:
-                    technical_str = "⚙️ " + " ".join(technical_parts)
-                else:
-                    technical_str = "⚙️ N/A"
-                
-                # 전체 거래량 및 수급 데이터 초압축 포맷 (1개월 평균과 3개월 평균 표시)
-                # 국내 종목인지 해외 종목인지 확인
+                # 수급 데이터 (국내 1일 기준)
                 is_domestic = '.KS' in ticker or '.KQ' in ticker
-                
+                supply_str = ""
+                dual_buying = False
                 if is_domestic:
-                    # 국내 종목: 1개월 평균과 3개월 평균 거래량 표시 (외국인/기관 순매매량 포함)
-                    # 1개월 평균 데이터 포맷팅
-                    volume_parts_1m = []
-                    supply_parts_1m = []
-                    
-                    total_volume_1m = result.get('total_volume_1m')
-                    if total_volume_1m is not None and total_volume_1m > 0:
-                        volume_parts_1m.append(f"<code>평균(1M):{total_volume_1m:.0f}만</code>")
-                    
-                    # 1개월 평균 수급 데이터는 최근 1거래일 데이터 사용 (1개월 평균 수급은 계산 복잡하므로)
                     supply_demand_1d = result.get('supply_demand_1d', {})
                     foreign_net_1d = supply_demand_1d.get('foreign')
                     institutional_net_1d = supply_demand_1d.get('institutional')
 
+                    supply_parts = []
                     if foreign_net_1d is not None:
-                        # -0 방지: 반올림 후 0이면 부호 없이 표시
-                        rounded_val = round(foreign_net_1d)
-                        if rounded_val == 0:
-                            supply_parts_1m.append(f"<code>외:0만</code>")
+                        rounded = round(foreign_net_1d)
+                        if rounded == 0:
+                            supply_parts.append("외0만")
                         else:
                             sign = "+" if foreign_net_1d >= 0 else ""
-                            supply_parts_1m.append(f"<code>외:{sign}{foreign_net_1d:.0f}만</code>")
+                            supply_parts.append(f"외{sign}{foreign_net_1d:.0f}만")
 
                     if institutional_net_1d is not None:
-                        # -0 방지: 반올림 후 0이면 부호 없이 표시
-                        rounded_val = round(institutional_net_1d)
-                        if rounded_val == 0:
-                            supply_parts_1m.append(f"<code>기:0만</code>")
+                        rounded = round(institutional_net_1d)
+                        if rounded == 0:
+                            supply_parts.append("기0만")
                         else:
                             sign = "+" if institutional_net_1d >= 0 else ""
-                            supply_parts_1m.append(f"<code>기:{sign}{institutional_net_1d:.0f}만</code>")
+                            supply_parts.append(f"기{sign}{institutional_net_1d:.0f}만")
 
-                    # 쌍끌이 판단: 반올림 값이 양수일 때 (표시와 일관성 유지)
-                    if foreign_net_1d is not None and institutional_net_1d is not None:
-                        if round(foreign_net_1d) > 0 and round(institutional_net_1d) > 0:
-                            supply_parts_1m.append("<code>🔥쌍끌이</code>")
-                    
-                    # 3개월 평균 데이터 포맷팅
-                    volume_parts_3m = []
-                    supply_parts_3m = []
-                    
-                    total_volume_3m = result.get('total_volume_3m')
-                    if total_volume_3m is not None and total_volume_3m > 0:
-                        volume_parts_3m.append(f"<code>평균(3M):{total_volume_3m:.0f}만</code>")
-                    
-                    # 3개월 평균 수급 데이터는 최근 3거래일 합계 데이터 사용
-                    supply_demand = result.get('supply_demand', {})
-                    foreign_net = supply_demand.get('foreign')
-                    institutional_net = supply_demand.get('institutional')
+                    if supply_parts:
+                        supply_str = " | " + "/".join(supply_parts)
 
-                    if foreign_net is not None:
-                        # -0 방지: 반올림 후 0이면 부호 없이 표시
-                        rounded_val = round(foreign_net)
-                        if rounded_val == 0:
-                            supply_parts_3m.append(f"<code>외:0만</code>")
-                        else:
-                            sign = "+" if foreign_net >= 0 else ""
-                            supply_parts_3m.append(f"<code>외:{sign}{foreign_net:.0f}만</code>")
+                    # 쌍끌이 판단
+                    if (foreign_net_1d is not None and institutional_net_1d is not None
+                            and round(foreign_net_1d) > 0 and round(institutional_net_1d) > 0):
+                        dual_buying = True
 
-                    if institutional_net is not None:
-                        # -0 방지: 반올림 후 0이면 부호 없이 표시
-                        rounded_val = round(institutional_net)
-                        if rounded_val == 0:
-                            supply_parts_3m.append(f"<code>기:0만</code>")
-                        else:
-                            sign = "+" if institutional_net >= 0 else ""
-                            supply_parts_3m.append(f"<code>기:{sign}{institutional_net:.0f}만</code>")
+                # 종목 요약 (2줄 기본, 이상 시 3줄)
+                # 1행: 종목명
+                line1 = f"{line1_emoji} <b>{ticker_name}</b>"
 
-                    # 쌍끌이 판단: 반올림 값이 양수일 때 (표시와 일관성 유지)
-                    if foreign_net is not None and institutional_net is not None:
-                        if round(foreign_net) > 0 and round(institutional_net) > 0:
-                            supply_parts_3m.append("<code>🔥쌍끌이</code>")
-                    
-                    # ETF 괴리율 (1개월 줄에만 표시)
-                    disparity_rate = result.get('disparity_rate')
-                    nav_part = None
-                    if disparity_rate is not None:
-                        sign = "+" if disparity_rate >= 0 else ""
-                        nav_part = f"<code>NAV{sign}{disparity_rate:.2f}%</code>"
-                    
-                    # 1개월 평균 포맷팅
-                    volume_supply_str_1m = ""
-                    if volume_parts_1m:
-                        volume_supply_str_1m = volume_parts_1m[0]
-                        if supply_parts_1m:
-                            foreign_part_1m = None
-                            inst_part_1m = None
-                            dual_buying_1m = None
-                            for part in supply_parts_1m:
-                                if '외:' in part:
-                                    foreign_part_1m = part
-                                elif '기:' in part:
-                                    inst_part_1m = part
-                                elif '쌍끌이' in part:
-                                    dual_buying_1m = part
+                # 2행: 가격 + 수익률 + 수급
+                line2 = f"💰 <b>{price_str}</b> {one_day_str} | {main_returns_str}{supply_str}"
 
-                            if foreign_part_1m or inst_part_1m:
-                                supply_combined_1m = " | ".join([p for p in [foreign_part_1m, inst_part_1m] if p])
-                                volume_supply_str_1m += f" | {supply_combined_1m}"
+                # 3행 (조건부): 이상 신호
+                alerts = []
+                if rsi is not None and rsi >= 70:
+                    alerts.append(f"⚠️ RSI {int(rsi)} 과열")
+                elif rsi is not None and rsi <= 30:
+                    alerts.append(f"⚠️ RSI {int(rsi)} 침체")
+                if pullback_status and '눌림목' in pullback_status:
+                    alerts.append("✅ 눌림목 감지")
+                if dual_buying:
+                    alerts.append("🔥 쌍끌이")
 
-                            if dual_buying_1m:
-                                volume_supply_str_1m += f" {dual_buying_1m}"
+                summary_lines = [line1, line2]
+                if alerts:
+                    summary_lines.append(" | ".join(alerts))
 
-                        if nav_part:
-                            volume_supply_str_1m += f" | {nav_part}"
-
-                    # 3개월 평균 포맷팅
-                    volume_supply_str_3m = ""
-                    if volume_parts_3m:
-                        volume_supply_str_3m = volume_parts_3m[0]
-                        if supply_parts_3m:
-                            foreign_part_3m = None
-                            inst_part_3m = None
-                            dual_buying_3m = None
-                            for part in supply_parts_3m:
-                                if '외:' in part:
-                                    foreign_part_3m = part
-                                elif '기:' in part:
-                                    inst_part_3m = part
-                                elif '쌍끌이' in part:
-                                    dual_buying_3m = part
-
-                            if foreign_part_3m or inst_part_3m:
-                                supply_combined_3m = " | ".join([p for p in [foreign_part_3m, inst_part_3m] if p])
-                                volume_supply_str_3m += f" | {supply_combined_3m}"
-
-                            if dual_buying_3m:
-                                volume_supply_str_3m += f" {dual_buying_3m}"
-                else:
-                    # 해외 종목: 1개월 평균, 3개월 평균 거래량과 기관 보유 비중 표시
-                    volume_parts_1m = []
-                    volume_parts_3m = []
-                    institutional_held = result.get('institutional_held')
-                    
-                    # 1개월 평균 거래량
-                    total_volume_1m = result.get('total_volume_1m')
-                    if total_volume_1m is not None and total_volume_1m > 0:
-                        volume_parts_1m.append(f"<code>평균(1M):{total_volume_1m:.0f}만</code>")
-                    
-                    # 3개월 평균 거래량
-                    total_volume_3m = result.get('total_volume_3m')
-                    if total_volume_3m is not None and total_volume_3m > 0:
-                        volume_parts_3m.append(f"<code>평균(3M):{total_volume_3m:.0f}만</code>")
-                    
-                    # 기관 보유 비중 (1개월 줄에만 표시)
-                    if institutional_held is not None:
-                        volume_parts_1m.append(f"<code>기관보유:{institutional_held:.1f}%</code>")
-                    
-                    # 해외 종목은 1개월, 3개월 각각 표시
-                    volume_supply_str_1m = " | ".join(volume_parts_1m) if volume_parts_1m else ""
-                    volume_supply_str_3m = " | ".join(volume_parts_3m) if volume_parts_3m else ""
-                
-                # 종목 요약 메시지 생성 (초압축 5줄 포맷)
-                # 1행: 헤더 (종목명, 티커, 상태)
-                # 2행: 가격/수익 (현재가, 1일%, 주요 기간 수익률)
-                # 3행: 지표 (RSI, 이격도, 52주)
-                # 4행: 거래량/수급 1개월 평균
-                # 5행: 거래량/수급 3개월 평균
-                summary_lines = [
-                    f"📊 <b>{ticker_name}</b> <code>{ticker}</code> {status_emoji}",
-                    f"💰 <b>{price_str}</b> {one_day_str} | {main_returns_str}",
-                    f"{technical_str}"
-                ]
-                
-                if volume_supply_str_1m:
-                    summary_lines.append(f"📊 {volume_supply_str_1m}")
-                
-                if volume_supply_str_3m:
-                    summary_lines.append(f"📊 {volume_supply_str_3m}")
-                
                 summary_line = "\n".join(summary_lines)
                 summary_parts.append(summary_line)
                 

@@ -22,7 +22,21 @@
       "WebFetch(domain:discuss.ai.google.dev)",
       "WebFetch(domain:ai.google.dev)",
       "Bash(playwright install:*)",
-      "Bash(test:*)"
+      "Bash(test:*)",
+      "Bash(cut:*)",
+      "Bash(curl:*)",
+      "Bash(iconv:*)",
+      "Bash(source:*)",
+      "Bash(/Users/sonbyeongcheol/.pyenv/versions/3.11.10/bin/pip install:*)",
+      "Bash(for func in get_supply_demand_pykrx get_kr_stock_data_krx_api get_etf_data_krx_api get_krx_api_status get_global_institutional_data)",
+      "Bash(do echo -n '$func: ' grep -r $func --include=*.py .)",
+      "Bash(gh run view:*)",
+      "Bash(gh workflow run:*)",
+      "Bash(gh run:*)",
+      "Bash(gh api:*)",
+      "Bash(git status:*)",
+      "WebFetch(domain:www.koreaexim.go.kr)",
+      "WebFetch(domain:www.data.go.kr)"
     ]
   }
 }
