@@ -14,6 +14,8 @@ TICKER_NAMES = {
     '411060.KS': 'ACE KRX금현물',
     '438080.KS': 'ACE 미국S&P500미국채혼합50액티브',
     '487230.KS': 'KODEX 미국AI전력핵심인프라',
+    # 국내 보유 (개별종목)
+    '064400.KS': 'LG CNS',
     # 국내 관심
     '449170.KS': 'TIGER KOFR금리액티브',
     '464310.KS': 'TIGER 글로벌AI&로보틱스 INDXX',
@@ -52,6 +54,7 @@ TICKER_NAME_MAPPING = {
     # 국내 종목
     '005930.KS': ['samsung', '삼성전자', '삼성'],
     '000660.KS': ['sk hynix', 'hynix', 'sk하이닉스', '하이닉스'],
+    '064400.KS': ['lg cns', 'lgcns', 'lg씨엔에스', '씨엔에스'],
 }
 
 def get_ticker_name(ticker: str) -> str:

@@ -4,6 +4,7 @@
 # possession, interest, domestic, overseas
 
 tickers_possession_domestic: #보유주식_국내
+  - "064400.KS" # LG CNS
 
 tickers_possession_overseas: #보유주식_해외
 
