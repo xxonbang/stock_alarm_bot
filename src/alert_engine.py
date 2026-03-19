@@ -280,9 +280,10 @@ def generate_normal_message(
         if tech_parts:
             lines.append(f"📈 기술지표: {' | '.join(tech_parts)}")
 
-        # 수급 (외국인/기관) — 전일 데이터는 표시하지 않음
+        # 수급 (외국인/기관/프로그램) — 전일 데이터는 표시하지 않음
         foreign = supply.get('foreign')
         institutional = supply.get('institutional')
+        program = supply.get('program')
         if (foreign is not None or institutional is not None) and not _is_previous_day_data(supply):
             sup_parts = []
             if foreign is not None:
@@ -300,6 +301,10 @@ def generate_normal_message(
                 sup_parts.append("⚠️ 동반 매도")
 
             lines.append(f"🏦 수급: {' | '.join(sup_parts)}")
+
+            if program is not None:
+                p_sign = "+" if program >= 0 else ""
+                lines.append(f"💻 프로그램: {p_sign}{program:.0f}만주")
 
         lines.append("")
 
@@ -402,11 +407,14 @@ def generate_alert_messages(
 
         foreign = supply.get('foreign')
         institutional = supply.get('institutional')
+        program = supply.get('program')
         if (foreign is not None or institutional is not None) and not _is_previous_day_data(supply):
             if foreign is not None:
                 msg1_lines.append(f"  외국인: {foreign:+.0f}만주")
             if institutional is not None:
                 msg1_lines.append(f"  기관: {institutional:+.0f}만주")
+            if program is not None:
+                msg1_lines.append(f"  프로그램: {program:+.0f}만주")
 
         msg1_lines.append("")
 
@@ -516,6 +524,7 @@ def generate_weekly_messages(
 
         foreign = supply.get('foreign')
         institutional = supply.get('institutional')
+        program = supply.get('program')
         if (foreign is not None or institutional is not None) and not _is_previous_day_data(supply):
             msg1_lines.append("")
             msg1_lines.append("  수급 현황:")
@@ -523,6 +532,8 @@ def generate_weekly_messages(
                 msg1_lines.append(f"    외국인: {foreign:+.0f}만주")
             if institutional is not None:
                 msg1_lines.append(f"    기관: {institutional:+.0f}만주")
+            if program is not None:
+                msg1_lines.append(f"    프로그램: {program:+.0f}만주")
 
     msg1_lines.append("")
 

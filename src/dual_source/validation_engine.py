@@ -177,6 +177,7 @@ class ValidationEngine:
             'foreign_net',
             'institutional_net',
             'total_volume',
+            'program_net_1d',
         ]
 
         match_count = 0

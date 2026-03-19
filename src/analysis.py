@@ -741,6 +741,12 @@ def calculate_returns(ticker: str) -> Dict:
                     if 'supply_demand_1d' not in result:
                         result['supply_demand_1d'] = {}
                     result['supply_demand_1d']['institutional'] = institutional_net_1d
+                # 프로그램 순매수
+                program_net_1d = kr_data.get('program_net_1d')
+                if program_net_1d is not None:
+                    if 'supply_demand_1d' not in result:
+                        result['supply_demand_1d'] = {}
+                    result['supply_demand_1d']['program'] = program_net_1d
                 # 데이터 기준 날짜
                 data_date = kr_data.get('data_date')
                 if data_date:

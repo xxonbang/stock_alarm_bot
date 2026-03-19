@@ -2181,6 +2181,7 @@ def prefetch_dual_source_batch(ticker_codes: list) -> None:
                 'disparity_rate': data.get('disparity_rate'),
                 'total_volume': data.get('total_volume'),
                 'total_volume_1d': data.get('total_volume_1d'),
+                'program_net_1d': data.get('program_net_1d'),
                 'data_date': data.get('data_date'),
                 '_confidence': validated.get('confidence', 0.0),
                 '_validation_status': validated.get('validation', {}).get('status', 'unknown'),
@@ -2255,6 +2256,7 @@ def get_kr_stock_data_v2(ticker_code: str) -> Dict[str, Optional[float]]:
             'disparity_rate': data.get('disparity_rate'),
             'total_volume': data.get('total_volume'),
             'total_volume_1d': data.get('total_volume_1d'),
+            'program_net_1d': data.get('program_net_1d'),
             'data_date': data.get('data_date'),
             # 추가 메타데이터
             '_confidence': validated.get('confidence', 0.0),

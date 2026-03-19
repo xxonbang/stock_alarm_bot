@@ -545,18 +545,38 @@ class KISSource(DataSourceBase):
         }
         return self._request_with_retry(url, params, "FHKST01010900")
 
+    def _get_intraday_investor_estimate(self, code: str, market: str) -> Optional[Dict[str, Any]]:
+        """외인기관 추정가집계 조회 (HHPTJ04160200) — 장중 실시간
+
+        종목별 당일 외국인/기관 추정 순매수량을 시간대별로 반환.
+        bsop_hour_gb: 1=장초, 2=오전, 3=오후, 4=최종(누적)
+        """
+        url = f"{self.BASE_URL}/uapi/domestic-stock/v1/quotations/investor-trade-by-stock-daily"
+        params = {
+            "MKSC_SHRN_ISCD": code,
+            "FID_COND_MRKT_DIV_CODE": market,
+            "FID_INPUT_ISCD": code,
+        }
+        return self._request_with_retry(url, params, "HHPTJ04160200")
+
     def _parse_supply_demand(self, output: Dict[str, Any]) -> SupplyDemandData:
-        """현재가 응답에서 거래량 추출 (수급 데이터는 투자자별 매매동향에서 수집)"""
+        """현재가 응답에서 거래량 + 프로그램 순매수 추출"""
         result: SupplyDemandData = {}
 
         try:
-            # 거래량만 현재가 API에서 추출
+            # 거래량
             acml_vol = output.get('acml_vol')
             if acml_vol and acml_vol != '':
                 result['total_volume_1d'] = float(acml_vol.replace(',', ''))
 
+            # 프로그램 순매수량 (주 → 만주)
+            pgtr_qty = output.get('pgtr_ntby_qty')
+            if pgtr_qty and pgtr_qty != '':
+                qty = float(pgtr_qty.replace(',', ''))
+                result['program_net_1d'] = round(qty / 10000, 2)
+
         except (ValueError, TypeError) as e:
-            logger.debug(f"KIS 거래량 파싱 오류: {e}")
+            logger.debug(f"KIS 현재가 파싱 오류: {e}")
 
         return result
 
@@ -598,6 +618,13 @@ class KISSource(DataSourceBase):
 
         return result
 
+    @staticmethod
+    def _parse_padded_int(value: str) -> int:
+        """부호+제로패딩 문자열을 정수로 파싱 (예: '-00000000000660000' → -660000)"""
+        if not value:
+            return 0
+        return int(value)
+
     def _collect_sync(self, ticker_code: str) -> SupplyDemandData:
         """동기 방식으로 데이터 수집"""
         if not self._token_manager.is_configured():
@@ -612,20 +639,50 @@ class KISSource(DataSourceBase):
 
         result: SupplyDemandData = {}
 
-        # 1. 현재가 조회 (거래량)
+        # 1. 현재가 조회 (거래량 + 프로그램 순매수)
         price_data = self._get_current_price(code, market)
         if price_data:
             output = price_data.get('output', {})
             if output:
                 result.update(self._parse_supply_demand(output))
 
-        # 2. 투자자별 매매동향 (외국인/기관 순매수 — 정확한 데이터)
-        investor_data = self._get_investor_trading(code, market)
-        if investor_data:
-            rows = investor_data.get('output', [])
+        # 2. 장중 추정가집계 (HHPTJ04160200) — 당일 실시간 외국인/기관
+        intraday_data = self._get_intraday_investor_estimate(code, market)
+        if intraday_data:
+            rows = intraday_data.get('output2', [])
             if isinstance(rows, list) and rows:
-                investor_result = self._parse_investor_data(rows)
-                result.update(investor_result)
+                # bsop_hour_gb=4 (최종 누적)를 찾거나, 가장 큰 값 사용
+                final_row = None
+                for row in rows:
+                    gb = row.get('bsop_hour_gb', '')
+                    if gb == '4':
+                        final_row = row
+                        break
+                if not final_row:
+                    final_row = rows[0]  # 첫 번째 row가 최신
+
+                if final_row:
+                    try:
+                        frgn = self._parse_padded_int(final_row.get('frgn_fake_ntby_qty', ''))
+                        orgn = self._parse_padded_int(final_row.get('orgn_fake_ntby_qty', ''))
+                        result['foreign_net_1d'] = round(frgn / 10000, 2)
+                        result['institutional_net_1d'] = round(orgn / 10000, 2)
+                        # 장중 가집계는 당일 데이터
+                        from datetime import datetime
+                        from zoneinfo import ZoneInfo
+                        result['data_date'] = datetime.now(ZoneInfo("Asia/Seoul")).strftime('%Y-%m-%d')
+                        logger.debug(f"KIS {ticker_code}: 장중 가집계 사용 (gb={final_row.get('bsop_hour_gb')})")
+                    except (ValueError, TypeError) as e:
+                        logger.debug(f"KIS 가집계 파싱 오류: {e}")
+
+        # 3. 가집계 실패 시 → 투자자별 매매동향 fallback (전일 데이터)
+        if result.get('foreign_net_1d') is None:
+            investor_data = self._get_investor_trading(code, market)
+            if investor_data:
+                rows = investor_data.get('output', [])
+                if isinstance(rows, list) and rows:
+                    investor_result = self._parse_investor_data(rows)
+                    result.update(investor_result)
 
         # 주의: KIS API는 1일 데이터만 제공
         # 3거래일 합계(foreign_net, institutional_net)는 pykrx에서 보완
@@ -633,6 +690,7 @@ class KISSource(DataSourceBase):
         logger.debug(
             f"KIS {ticker_code}: 외인={result.get('foreign_net_1d')}만주, "
             f"기관={result.get('institutional_net_1d')}만주, "
+            f"프로그램={result.get('program_net_1d')}만주, "
             f"날짜={result.get('data_date')}"
         )
 
