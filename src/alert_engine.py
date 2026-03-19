@@ -280,12 +280,10 @@ def generate_normal_message(
         if tech_parts:
             lines.append(f"📈 기술지표: {' | '.join(tech_parts)}")
 
-        # 수급 (외국인/기관)
+        # 수급 (외국인/기관) — 전일 데이터는 표시하지 않음
         foreign = supply.get('foreign')
         institutional = supply.get('institutional')
-        if foreign is not None or institutional is not None:
-            is_prev = _is_previous_day_data(supply)
-            date_label = "(전일)" if is_prev else ""
+        if (foreign is not None or institutional is not None) and not _is_previous_day_data(supply):
             sup_parts = []
             if foreign is not None:
                 f_sign = "+" if foreign >= 0 else ""
@@ -294,16 +292,14 @@ def generate_normal_message(
                 i_sign = "+" if institutional >= 0 else ""
                 sup_parts.append(f"기관 {i_sign}{institutional:.0f}만주")
 
-            # 쌍끌이 판단 (전일 데이터면 쌍끌이/동반매도 라벨 생략)
-            if not is_prev:
-                if (foreign is not None and institutional is not None
-                        and round(foreign) > 0 and round(institutional) > 0):
-                    sup_parts.append("🔥 <b>쌍끌이!</b>")
-                elif (foreign is not None and institutional is not None
-                        and round(foreign) < 0 and round(institutional) < 0):
-                    sup_parts.append("⚠️ 동반 매도")
+            if (foreign is not None and institutional is not None
+                    and round(foreign) > 0 and round(institutional) > 0):
+                sup_parts.append("🔥 <b>쌍끌이!</b>")
+            elif (foreign is not None and institutional is not None
+                    and round(foreign) < 0 and round(institutional) < 0):
+                sup_parts.append("⚠️ 동반 매도")
 
-            lines.append(f"🏦 수급{date_label}: {' | '.join(sup_parts)}")
+            lines.append(f"🏦 수급: {' | '.join(sup_parts)}")
 
         lines.append("")
 
@@ -406,13 +402,11 @@ def generate_alert_messages(
 
         foreign = supply.get('foreign')
         institutional = supply.get('institutional')
-        if foreign is not None or institutional is not None:
-            is_prev = _is_previous_day_data(supply)
-            date_label = "(전일)" if is_prev else ""
+        if (foreign is not None or institutional is not None) and not _is_previous_day_data(supply):
             if foreign is not None:
-                msg1_lines.append(f"  외국인{date_label}: {foreign:+.0f}만주")
+                msg1_lines.append(f"  외국인: {foreign:+.0f}만주")
             if institutional is not None:
-                msg1_lines.append(f"  기관{date_label}: {institutional:+.0f}만주")
+                msg1_lines.append(f"  기관: {institutional:+.0f}만주")
 
         msg1_lines.append("")
 
@@ -522,11 +516,9 @@ def generate_weekly_messages(
 
         foreign = supply.get('foreign')
         institutional = supply.get('institutional')
-        if foreign is not None or institutional is not None:
-            is_prev = _is_previous_day_data(supply)
-            date_label = "(전일)" if is_prev else ""
+        if (foreign is not None or institutional is not None) and not _is_previous_day_data(supply):
             msg1_lines.append("")
-            msg1_lines.append(f"  수급 현황{date_label}:")
+            msg1_lines.append("  수급 현황:")
             if foreign is not None:
                 msg1_lines.append(f"    외국인: {foreign:+.0f}만주")
             if institutional is not None:
