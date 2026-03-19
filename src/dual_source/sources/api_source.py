@@ -117,6 +117,7 @@ class TraditionalAPISource(DataSourceBase):
             # 최근 1거래일
             if len(df) > 0:
                 latest = df.iloc[-1]
+                result['data_date'] = str(df.index[-1].date())
                 if '외국인합계' in df.columns:
                     result['foreign_net_1d'] = round(latest['외국인합계'] / 10000, 2)
                 if '기관합계' in df.columns:
@@ -172,6 +173,7 @@ class TraditionalAPISource(DataSourceBase):
                                 if count == 0:
                                     result['foreign_net_1d'] = round(foreign_val / 10000, 2)
                                     result['institutional_net_1d'] = round(inst_val / 10000, 2)
+                                    result['data_date'] = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
 
                                 foreign_sum += foreign_val
                                 institutional_sum += inst_val
@@ -296,6 +298,11 @@ class TraditionalAPISource(DataSourceBase):
                                 inst_sum += val
                                 if count == 0:
                                     result['institutional_net_1d'] = round(val, 2)
+
+                        # 첫 번째 데이터 행의 날짜를 data_date로 설정
+                        if count == 0 and date_text:
+                            # 네이버 날짜 형식: "2026.03.18" → "2026-03-18"
+                            result['data_date'] = date_text.replace('.', '-')
 
                         count += 1
                         if count >= 3:
@@ -478,6 +485,8 @@ class TraditionalAPISource(DataSourceBase):
                     result['foreign_net_1d'] = pykrx_data['foreign_net_1d']
                 if result.get('institutional_net_1d') is None and pykrx_data.get('institutional_net_1d') is not None:
                     result['institutional_net_1d'] = pykrx_data['institutional_net_1d']
+                if not result.get('data_date') and pykrx_data.get('data_date'):
+                    result['data_date'] = pykrx_data['data_date']
                 logger.debug(f"{ticker_code}: pykrx 3일 합계 데이터 보완")
 
         # 3. KRX API 시도 (Fallback 2 - 3일 합계 데이터 보완)
@@ -498,6 +507,8 @@ class TraditionalAPISource(DataSourceBase):
                     result['foreign_net_1d'] = krx_data['foreign_net_1d']
                 if result.get('institutional_net_1d') is None and krx_data.get('institutional_net_1d') is not None:
                     result['institutional_net_1d'] = krx_data['institutional_net_1d']
+                if not result.get('data_date') and krx_data.get('data_date'):
+                    result['data_date'] = krx_data['data_date']
                 logger.debug(f"{ticker_code}: KRX API 3일 합계 보완")
 
         # 4. 네이버 크롤링 (최종 폴백 + 교차 검증)
@@ -525,6 +536,8 @@ class TraditionalAPISource(DataSourceBase):
                     result['foreign_net_1d'] = naver_data['foreign_net_1d']
                 if result.get('institutional_net_1d') is None and naver_data.get('institutional_net_1d') is not None:
                     result['institutional_net_1d'] = naver_data['institutional_net_1d']
+                if not result.get('data_date') and naver_data.get('data_date'):
+                    result['data_date'] = naver_data['data_date']
                 logger.debug(f"{ticker_code}: 네이버 크롤링으로 데이터 보완")
 
         # 5. ETF 괴리율

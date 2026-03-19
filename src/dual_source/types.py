@@ -29,6 +29,7 @@ class SupplyDemandData(TypedDict, total=False):
     disparity_rate: Optional[float]        # ETF 괴리율 (NAV 대비 %)
     total_volume: Optional[float]          # 전체 거래량 (주 단위, 3거래일 합계)
     total_volume_1d: Optional[float]       # 전체 거래량 (주 단위, 1거래일)
+    data_date: Optional[str]              # 수급 데이터 기준 날짜 (YYYY-MM-DD)
 
 
 class CollectionResult(TypedDict, total=False):

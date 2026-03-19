@@ -531,30 +531,70 @@ class KISSource(DataSourceBase):
         }
         return self._request_with_retry(url, params, "FHKST01010100")
 
+    def _get_investor_trading(self, code: str, market: str) -> Optional[Dict[str, Any]]:
+        """투자자별 매매동향 조회 (FHKST01010900)
+
+        응답 구조: output은 일별 리스트 (최근 30거래일)
+        각 row: stck_bsop_date, frgn_ntby_qty, orgn_ntby_qty, prsn_ntby_qty 등
+        장중에는 당일([0]) 수급 필드가 빈 문자열일 수 있음
+        """
+        url = f"{self.BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor"
+        params = {
+            "FID_COND_MRKT_DIV_CODE": market,
+            "FID_INPUT_ISCD": code,
+        }
+        return self._request_with_retry(url, params, "FHKST01010900")
+
     def _parse_supply_demand(self, output: Dict[str, Any]) -> SupplyDemandData:
-        """현재가 응답에서 수급 데이터 추출"""
+        """현재가 응답에서 거래량 추출 (수급 데이터는 투자자별 매매동향에서 수집)"""
         result: SupplyDemandData = {}
 
         try:
-            # 외국인 순매수량 (주 → 만주)
-            frgn_qty = output.get('frgn_ntby_qty')
-            if frgn_qty and frgn_qty != '':
-                qty = float(frgn_qty.replace(',', ''))
-                result['foreign_net_1d'] = round(qty / 10000, 2)
-
-            # 기관 순매수량 (주 → 만주)
-            pgtr_qty = output.get('pgtr_ntby_qty')
-            if pgtr_qty and pgtr_qty != '':
-                qty = float(pgtr_qty.replace(',', ''))
-                result['institutional_net_1d'] = round(qty / 10000, 2)
-
-            # 거래량
+            # 거래량만 현재가 API에서 추출
             acml_vol = output.get('acml_vol')
             if acml_vol and acml_vol != '':
                 result['total_volume_1d'] = float(acml_vol.replace(',', ''))
 
         except (ValueError, TypeError) as e:
-            logger.debug(f"KIS 수급 데이터 파싱 오류: {e}")
+            logger.debug(f"KIS 거래량 파싱 오류: {e}")
+
+        return result
+
+    def _parse_investor_data(self, rows: list) -> SupplyDemandData:
+        """투자자별 매매동향 응답에서 수급 데이터 추출
+
+        장중에는 당일 데이터([0])가 빈 문자열이므로,
+        유효한 데이터가 있는 첫 번째 row를 사용하고 data_date를 설정한다.
+        """
+        result: SupplyDemandData = {}
+
+        try:
+            for row in rows:
+                frgn_qty = row.get('frgn_ntby_qty', '')
+                orgn_qty = row.get('orgn_ntby_qty', '')
+                bsop_date = row.get('stck_bsop_date', '')
+
+                # 빈 문자열이면 당일 미확정 데이터 → 다음 row
+                if not frgn_qty and not orgn_qty:
+                    continue
+
+                # 유효한 데이터 발견
+                if frgn_qty:
+                    qty = float(str(frgn_qty).replace(',', ''))
+                    result['foreign_net_1d'] = round(qty / 10000, 2)
+
+                if orgn_qty:
+                    qty = float(str(orgn_qty).replace(',', ''))
+                    result['institutional_net_1d'] = round(qty / 10000, 2)
+
+                # 기준 날짜 설정
+                if bsop_date and len(bsop_date) == 8:
+                    result['data_date'] = f"{bsop_date[:4]}-{bsop_date[4:6]}-{bsop_date[6:8]}"
+
+                break  # 첫 번째 유효 row만 사용
+
+        except (ValueError, TypeError) as e:
+            logger.debug(f"KIS 투자자 데이터 파싱 오류: {e}")
 
         return result
 
@@ -570,24 +610,30 @@ class KISSource(DataSourceBase):
         code = self._extract_code(ticker_code)
         market = self._get_market_code(ticker_code)
 
-        # 현재가 조회
-        data = self._get_current_price(code, market)
-        if not data:
-            return {}
+        result: SupplyDemandData = {}
 
-        output = data.get('output', {})
-        if not output:
-            return {}
+        # 1. 현재가 조회 (거래량)
+        price_data = self._get_current_price(code, market)
+        if price_data:
+            output = price_data.get('output', {})
+            if output:
+                result.update(self._parse_supply_demand(output))
 
-        result = self._parse_supply_demand(output)
+        # 2. 투자자별 매매동향 (외국인/기관 순매수 — 정확한 데이터)
+        investor_data = self._get_investor_trading(code, market)
+        if investor_data:
+            rows = investor_data.get('output', [])
+            if isinstance(rows, list) and rows:
+                investor_result = self._parse_investor_data(rows)
+                result.update(investor_result)
 
-        # 주의: KIS 현재가 API는 1일 데이터만 제공
-        # 3거래일 합계(foreign_net, institutional_net)는 설정하지 않음
-        # → pykrx에서 실제 3일 합계 데이터를 제공하도록 함
+        # 주의: KIS API는 1일 데이터만 제공
+        # 3거래일 합계(foreign_net, institutional_net)는 pykrx에서 보완
 
         logger.debug(
             f"KIS {ticker_code}: 외인={result.get('foreign_net_1d')}만주, "
-            f"기관={result.get('institutional_net_1d')}만주"
+            f"기관={result.get('institutional_net_1d')}만주, "
+            f"날짜={result.get('data_date')}"
         )
 
         return result

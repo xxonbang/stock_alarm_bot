@@ -243,6 +243,14 @@ class ValidationEngine:
                 merged_data[field] = selected_value
                 field_results[field] = f"merged:{source_a_name if source == 'source_a' else source_b_name}"
 
+        # data_date 전달 (우선순위: Source A > Source B)
+        data_date_a = data_a.get('data_date')
+        data_date_b = data_b.get('data_date')
+        if data_date_a:
+            merged_data['data_date'] = data_date_a
+        elif data_date_b:
+            merged_data['data_date'] = data_date_b
+
         # 검증 상태 결정
         if not has_source_a and not has_source_b:
             status = ValidationStatus.EMPTY
