@@ -1,5 +1,26 @@
 # Task History
 
+## 2026-03-19
+
+### [기능] 장중 실시간 수급 + 프로그램 매매 수집 (2026-03-19 22:00 KST)
+- 커밋: f02d157
+- 변경 파일: `src/dual_source/sources/kis_source.py`, `src/dual_source/types.py`, `src/dual_source/validation_engine.py`, `src/crawler.py`, `src/analysis.py`, `src/alert_engine.py`
+- 내용:
+  1. KIS `HHPTJ04160200` (외인기관 추정가집계) 엔드포인트 추가 — 장중 당일 실시간 외국인/기관 수급
+  2. `program_net_1d` 필드 추가 — `inquire-price`의 `pgtr_ntby_qty`로 종목별 프로그램 매매 수집
+  3. 리포트 3개 모드에 프로그램 매매 표시 ("💻 프로그램: ±N만주")
+  4. 수집 우선순위: HHPTJ04160200(장중 가집계) → FHKST01010900(전일 fallback)
+
+### [버그픽스] 수급 데이터 4건 버그 수정 (2026-03-19 21:00 KST)
+- 커밋: 91dc39f
+- 변경 파일: `src/dual_source/sources/kis_source.py`, `src/dual_source/sources/api_source.py`, `src/dual_source/types.py`, `src/dual_source/validation_engine.py`, `src/alert_engine.py`, `src/analysis.py`, `src/crawler.py`
+- 내용:
+  1. KIS API `pgtr_ntby_qty`(프로그램매매)를 기관 순매수로 잘못 매핑하던 버그 수정 → `FHKST01010900`(투자자별 매매동향)의 `orgn_ntby_qty` 사용
+  2. 전일 결산 데이터를 당일 데이터처럼 표시하던 문제 수정 → `data_date` 필드 추가, "(전일)" 라벨 표시, 전일 데이터 쌍끌이 판정 제외
+  3. pykrx 미설치 해결
+  4. 배치 캐시 경로 `data_date` 전달 누락 수정
+- 원인: KIS `inquire-price`의 `frgn_ntby_qty`가 장중에 전일 결산값을 반환하고, `pgtr_ntby_qty`는 프로그램매매인데 기관으로 잘못 매핑
+
 ## 2026-03-14
 
 ### [기능] v3 리포트 시스템 전면 재설계 (2026-03-14 23:30 KST)
