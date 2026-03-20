@@ -88,10 +88,10 @@ class SupabaseCredentialsManager:
         try:
             # 환경변수에서 Supabase 설정 로드
             self._supabase_url = os.getenv('SUPABASE_URL', self.DEFAULT_SUPABASE_URL)
-            self._supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+            self._supabase_key = os.getenv('SUPASECRET_KEY')
 
             if not self._supabase_key:
-                logger.info("SUPABASE_SERVICE_ROLE_KEY 미설정 - 환경변수 모드로 동작")
+                logger.info("SUPASECRET_KEY 미설정 - 환경변수 모드로 동작")
                 self._connection_failed = True
                 return
 

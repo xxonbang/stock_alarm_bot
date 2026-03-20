@@ -68,6 +68,6 @@ jobs:
           FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
           # Supabase (KIS 토큰 공유용)
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPASECRET_KEY: ${{ secrets.SUPASECRET_KEY }}
         run: |
           python src/main.py
