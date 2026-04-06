@@ -1,5 +1,27 @@
 # Task History
 
+## 2026-04-06
+
+### [기능] 리포트 투자 지표 고도화 (2026-04-06 22:30 KST)
+- 변경 파일: `src/analysis.py`, `src/alert_engine.py`
+- 내용:
+  1. 9개 지표 함수 추가 (볼린저밴드, 스토캐스틱, OBV, ATR, 골든/데드크로스, 거래량이상, 공매도, PER/PBR, MDD/베타)
+  2. 평시/경보/주간 3모드 리포트에 반영 (평시: 이상 징후만, 주간: 전체)
+  3. 포트폴리오 매수가 대비 수익률 표시
+
+### [기능] 텔레그램 포트폴리오 CRUD 봇 (2026-04-06 21:30 KST)
+- 변경 파일: `src/telegram_bot.py`(신규), `src/portfolio_manager.py`(신규), `src/stock_search.py`(신규), `src/__main__.py`(신규), `config/settings.py`, `requirements.txt`
+- 내용:
+  1. `/pf` 명령어로 인라인 버튼 기반 보유/관심 종목 CRUD
+  2. Supabase `portfolio` 테이블 primary, config.yaml fallback
+  3. 종목 검색: 네이버 금융 크롤링 3,800+ 종목 캐시 (한글), yfinance (영문)
+  4. settings.py가 Supabase 포트폴리오를 자동 로드하여 리포트 연동
+  5. 실행: `python -m src`
+
+### [진단] 투자 리포트 품질 고도화 리서치 (2026-04-06 21:00 KST)
+- 변경 파일: `docs/research/2026-04-06-report-enhancement.md`
+- 내용: 8개 카테고리(수익률 분석, 기술 지표, 밸류에이션, 옵션/선물, 섹터, 리스크, 센티먼트, 타이밍) 웹 리서치. 우선순위 정리.
+
 ## 2026-03-19
 
 ### [기능] 장중 실시간 수급 + 프로그램 매매 수집 (2026-03-19 22:00 KST)

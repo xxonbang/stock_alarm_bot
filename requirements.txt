@@ -43,3 +43,6 @@ playwright>=1.40.0
 
 # Supabase (API 키 공유 저장소)
 supabase>=2.0.0
+
+# 텔레그램 봇 (포트폴리오 CRUD용, polling 방식)
+python-telegram-bot>=21.0

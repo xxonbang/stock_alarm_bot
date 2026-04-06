@@ -43,11 +43,19 @@ class Settings:
     def __init__(self):
         config = load_config()
         
-        # 카테고리별로 티커 저장 (빈 리스트는 None 또는 빈 리스트로 유지)
-        self.tickers_possession_domestic = config.get('tickers_possession_domestic', []) or []
-        self.tickers_possession_overseas = config.get('tickers_possession_overseas', []) or []
-        self.tickers_interest_domestic = config.get('tickers_interest_domestic', []) or []
-        self.tickers_interest_overseas = config.get('tickers_interest_overseas', []) or []
+        # 카테고리별로 티커 저장
+        # Supabase 우선, config.yaml fallback
+        supabase_tickers = self._load_portfolio_from_supabase()
+        if supabase_tickers:
+            self.tickers_possession_domestic = supabase_tickers['possession_domestic']
+            self.tickers_possession_overseas = supabase_tickers['possession_overseas']
+            self.tickers_interest_domestic = supabase_tickers['interest_domestic']
+            self.tickers_interest_overseas = supabase_tickers['interest_overseas']
+        else:
+            self.tickers_possession_domestic = config.get('tickers_possession_domestic', []) or []
+            self.tickers_possession_overseas = config.get('tickers_possession_overseas', []) or []
+            self.tickers_interest_domestic = config.get('tickers_interest_domestic', []) or []
+            self.tickers_interest_overseas = config.get('tickers_interest_overseas', []) or []
         
         # 전체 티커 리스트 (분석용)
         all_tickers = []
@@ -145,6 +153,16 @@ class Settings:
         # https://financialmodelingprep.com 에서 발급 (무료: 250 calls/day)
         self.fmp_api_key = os.getenv('FMP_API_KEY', None)
     
+    @staticmethod
+    def _load_portfolio_from_supabase():
+        """Supabase에서 포트폴리오 티커 로드"""
+        try:
+            from src.portfolio_manager import PortfolioManager
+            pm = PortfolioManager()
+            return pm.get_tickers_by_category()
+        except Exception:
+            return None
+
     def __repr__(self):
         return f"Settings(tickers={len(self.tickers)}개, schedule_times={len(self.schedule_times)}개)"
 

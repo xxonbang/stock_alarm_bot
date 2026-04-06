@@ -280,6 +280,22 @@ def generate_normal_message(
         if tech_parts:
             lines.append(f"📈 기술지표: {' | '.join(tech_parts)}")
 
+        # 볼린저/골든크로스/거래량 (이상 징후만)
+        bollinger = technical.get('bollinger')
+        bl = _format_bollinger_line(bollinger, mode='normal')
+        if bl:
+            lines.append(bl)
+
+        gdc = technical.get('golden_dead_cross')
+        gl = _format_golden_dead_cross_line(gdc, mode='normal')
+        if gl:
+            lines.append(gl)
+
+        vs = technical.get('volume_spike')
+        vl = _format_volume_spike_line(vs, mode='normal')
+        if vl:
+            lines.append(vl)
+
         # 수급 (외국인/기관/프로그램) — 전일 데이터는 표시하지 않음
         foreign = supply.get('foreign')
         institutional = supply.get('institutional')
@@ -305,6 +321,29 @@ def generate_normal_message(
             if program is not None:
                 p_sign = "+" if program >= 0 else ""
                 lines.append(f"💻 프로그램: {p_sign}{program:.0f}만주")
+
+        # 공매도 (값이 있을 때만)
+        short_selling = result.get('short_selling')
+        sl = _format_short_selling_line(short_selling)
+        if sl:
+            lines.append(sl)
+
+        # 포트폴리오 수익
+        pl = _format_portfolio_line(ticker, price)
+        if pl:
+            lines.append(pl)
+
+        # 밸류에이션 (값이 있을 때만)
+        valuation = result.get('valuation')
+        val_l = _format_valuation_line(valuation)
+        if val_l:
+            lines.append(val_l)
+
+        # 리스크 (값이 있을 때만)
+        risk_metrics = result.get('risk_metrics')
+        rl = _format_risk_line(risk_metrics)
+        if rl:
+            lines.append(rl)
 
         lines.append("")
 
@@ -402,8 +441,47 @@ def generate_alert_messages(
                 msg1_lines.append(f"  {label}: {val:+.1f}%")
 
         rsi = technical.get('rsi')
+        macd = technical.get('macd', {})
+        tech_parts = []
         if rsi is not None:
-            msg1_lines.append(f"  RSI: {rsi:.0f}")
+            tech_parts.append(f"RSI {rsi:.0f}")
+        if macd and isinstance(macd, dict):
+            trend = macd.get('trend', '')
+            if trend:
+                tech_parts.append(f"MACD {trend}")
+        if tech_parts:
+            msg1_lines.append(f"  📈 기술지표: {' | '.join(tech_parts)}")
+
+        # 볼린저/골든크로스/거래량/스토캐스틱/OBV/ATR (상세)
+        bollinger = technical.get('bollinger')
+        bl = _format_bollinger_line(bollinger, mode='normal')
+        if bl:
+            msg1_lines.append(bl)
+
+        gdc = technical.get('golden_dead_cross')
+        gl = _format_golden_dead_cross_line(gdc, mode='normal')
+        if gl:
+            msg1_lines.append(gl)
+
+        vs = technical.get('volume_spike')
+        vl = _format_volume_spike_line(vs, mode='normal')
+        if vl:
+            msg1_lines.append(vl)
+
+        stoch = technical.get('stochastic')
+        stl = _format_stochastic_line(stoch)
+        if stl:
+            msg1_lines.append(stl)
+
+        obv = technical.get('obv')
+        ol = _format_obv_line(obv)
+        if ol:
+            msg1_lines.append(ol)
+
+        atr = technical.get('atr')
+        al = _format_atr_line(atr)
+        if al:
+            msg1_lines.append(al)
 
         foreign = supply.get('foreign')
         institutional = supply.get('institutional')
@@ -415,6 +493,29 @@ def generate_alert_messages(
                 msg1_lines.append(f"  기관: {institutional:+.0f}만주")
             if program is not None:
                 msg1_lines.append(f"  프로그램: {program:+.0f}만주")
+
+        # 공매도
+        short_selling = result.get('short_selling')
+        sl = _format_short_selling_line(short_selling)
+        if sl:
+            msg1_lines.append(sl)
+
+        # 포트폴리오 수익
+        pl = _format_portfolio_line(ticker, price)
+        if pl:
+            msg1_lines.append(pl)
+
+        # 밸류에이션
+        valuation = result.get('valuation')
+        val_l = _format_valuation_line(valuation)
+        if val_l:
+            msg1_lines.append(val_l)
+
+        # 리스크
+        risk_metrics = result.get('risk_metrics')
+        rl = _format_risk_line(risk_metrics)
+        if rl:
+            msg1_lines.append(rl)
 
         msg1_lines.append("")
 
@@ -522,6 +623,43 @@ def generate_weekly_messages(
         if pullback and '눌림목' in pullback:
             msg1_lines.append("  ✅ 눌림목 감지: 건강한 조정 구간, 분할매수 고려 가능")
 
+        macd = technical.get('macd', {})
+        if macd and isinstance(macd, dict):
+            trend = macd.get('trend', '')
+            if trend:
+                msg1_lines.append(f"  MACD: {trend}")
+
+        # 볼린저/골든크로스/거래량/스토캐스틱/OBV/ATR (모두 표시)
+        bollinger = technical.get('bollinger')
+        bl = _format_bollinger_line(bollinger, mode='full')
+        if bl:
+            msg1_lines.append(bl)
+
+        gdc = technical.get('golden_dead_cross')
+        gl = _format_golden_dead_cross_line(gdc, mode='full')
+        if gl:
+            msg1_lines.append(gl)
+
+        vs = technical.get('volume_spike')
+        vl = _format_volume_spike_line(vs, mode='full')
+        if vl:
+            msg1_lines.append(vl)
+
+        stoch = technical.get('stochastic')
+        stl = _format_stochastic_line(stoch)
+        if stl:
+            msg1_lines.append(stl)
+
+        obv = technical.get('obv')
+        ol = _format_obv_line(obv)
+        if ol:
+            msg1_lines.append(ol)
+
+        atr = technical.get('atr')
+        al = _format_atr_line(atr)
+        if al:
+            msg1_lines.append(al)
+
         foreign = supply.get('foreign')
         institutional = supply.get('institutional')
         program = supply.get('program')
@@ -534,6 +672,31 @@ def generate_weekly_messages(
                 msg1_lines.append(f"    기관: {institutional:+.0f}만주")
             if program is not None:
                 msg1_lines.append(f"    프로그램: {program:+.0f}만주")
+
+        # 공매도
+        short_selling = result.get('short_selling')
+        sl = _format_short_selling_line(short_selling)
+        if sl:
+            msg1_lines.append(sl)
+
+        msg1_lines.append("")
+
+        # 포트폴리오 수익
+        pl = _format_portfolio_line(ticker, price)
+        if pl:
+            msg1_lines.append(pl)
+
+        # 밸류에이션 (모두 표시)
+        valuation = result.get('valuation')
+        val_l = _format_valuation_line(valuation)
+        if val_l:
+            msg1_lines.append(val_l)
+
+        # 리스크 (모두 표시)
+        risk_metrics = result.get('risk_metrics')
+        rl = _format_risk_line(risk_metrics)
+        if rl:
+            msg1_lines.append(rl)
 
     msg1_lines.append("")
 
@@ -683,6 +846,170 @@ def generate_intraday_message(intraday_data: Dict) -> List[str]:
     lines.append("💡 장중 추정치이며, 확정 데이터는 장 마감 후 저녁 리포트에서 확인하실 수 있습니다.")
 
     return ["\n".join(lines)]
+
+
+def _get_portfolio_buy_info(ticker: str) -> Optional[Dict]:
+    """포트폴리오에서 매수 정보 조회 (buy_price, buy_quantity)"""
+    try:
+        from src.portfolio_manager import PortfolioManager
+        pm = PortfolioManager()
+        items = pm.list_by_category('possession')
+        for item in items:
+            if item.get('ticker') == ticker:
+                buy_price = item.get('buy_price')
+                if buy_price is not None:
+                    return {'buy_price': buy_price, 'buy_quantity': item.get('buy_quantity')}
+        return None
+    except Exception:
+        return None
+
+
+def _format_bollinger_line(bollinger: Optional[Dict], mode: str = 'normal') -> Optional[str]:
+    """볼린저 밴드 라인 포맷. mode='normal'이면 squeeze일 때만, 'full'이면 항상"""
+    if not bollinger:
+        return None
+    squeeze = bollinger.get('squeeze')
+    bandwidth = bollinger.get('bandwidth')
+    percent_b = bollinger.get('percent_b')
+    if mode == 'normal':
+        if squeeze:
+            return "   볼린저: 밴드 수축 중 ⚡ (큰 변동 임박)"
+        return None
+    # full mode (weekly)
+    parts = []
+    if bandwidth is not None:
+        parts.append(f"밴드폭 {bandwidth:.1f}")
+    if percent_b is not None:
+        parts.append(f"%B {percent_b:.2f}")
+    if squeeze:
+        parts.append("⚡ 수축 중")
+    return f"   볼린저: {' | '.join(parts)}" if parts else None
+
+
+def _format_golden_dead_cross_line(gdc: Optional[Dict], mode: str = 'normal') -> Optional[str]:
+    """골든/데드크로스 라인. mode='normal'이면 10일 이내만, 'full'이면 항상"""
+    if not gdc:
+        return None
+    cross_type = gdc.get('cross_type')
+    days_since = gdc.get('days_since')
+    if cross_type is None:
+        if mode == 'full':
+            return "   골든/데드크로스: 없음"
+        return None
+    if mode == 'normal' and days_since is not None and days_since > 10:
+        return None
+    label = "골든크로스" if cross_type == 'golden' else "데드크로스"
+    emoji = "⚡" if cross_type == 'golden' else "⚠️"
+    days_str = f" ({days_since}일 전)" if days_since is not None else ""
+    return f"   {emoji} {label} 발생{days_str}"
+
+
+def _format_volume_spike_line(vs: Optional[Dict], mode: str = 'normal') -> Optional[str]:
+    """거래량 급증 라인. mode='normal'이면 2배 이상만, 'full'이면 항상"""
+    if not vs:
+        return None
+    is_spike = vs.get('is_spike', False)
+    ratio = vs.get('ratio')
+    if ratio is None:
+        return None
+    if mode == 'normal' and not is_spike:
+        return None
+    emoji = "⚡" if is_spike else ""
+    return f"   거래량: 20일 평균 대비 {ratio:.1f}배 {emoji}".rstrip()
+
+
+def _format_short_selling_line(short: Optional[Dict]) -> Optional[str]:
+    """공매도 라인"""
+    if not short:
+        return None
+    ratio = short.get('short_ratio')
+    if ratio is None:
+        return None
+    return f"   공매도: {ratio:.1f}%"
+
+
+def _format_valuation_line(val: Optional[Dict]) -> Optional[str]:
+    """밸류에이션 라인"""
+    if not val:
+        return None
+    parts = []
+    per = val.get('per')
+    pbr = val.get('pbr')
+    if per is not None:
+        parts.append(f"PER {per:.1f}")
+    if pbr is not None:
+        parts.append(f"PBR {pbr:.1f}")
+    eps = val.get('eps')
+    div_yield = val.get('div_yield')
+    if eps is not None:
+        parts.append(f"EPS {eps:,.0f}")
+    if div_yield is not None:
+        parts.append(f"배당률 {div_yield:.1f}%")
+    return f"📊 밸류에이션: {' | '.join(parts)}" if parts else None
+
+
+def _format_risk_line(risk: Optional[Dict]) -> Optional[str]:
+    """리스크 라인"""
+    if not risk:
+        return None
+    parts = []
+    beta = risk.get('beta')
+    mdd = risk.get('mdd_3m')
+    sharpe = risk.get('sharpe')
+    if beta is not None:
+        parts.append(f"베타 {beta:.2f}")
+    if mdd is not None:
+        parts.append(f"3개월 MDD {mdd:.1f}%")
+    if sharpe is not None:
+        parts.append(f"샤프 {sharpe:.2f}")
+    return f"⚠️ 리스크: {' | '.join(parts)}" if parts else None
+
+
+def _format_portfolio_line(ticker: str, current_price) -> Optional[str]:
+    """포트폴리오 내 수익 라인"""
+    if not isinstance(current_price, (int, float)) or current_price <= 0:
+        return None
+    info = _get_portfolio_buy_info(ticker)
+    if not info:
+        return None
+    buy_price = info['buy_price']
+    if buy_price is None or buy_price <= 0:
+        return None
+    pct = (current_price - buy_price) / buy_price * 100
+    return f"💼 내 수익: 매수가 {buy_price:,.0f} → 현재 {current_price:,.0f} ({pct:+.1f}%)"
+
+
+def _format_stochastic_line(stoch: Optional[Dict]) -> Optional[str]:
+    """스토캐스틱 라인"""
+    if not stoch:
+        return None
+    k = stoch.get('k')
+    d = stoch.get('d')
+    if k is None and d is None:
+        return None
+    parts = []
+    if k is not None:
+        parts.append(f"%K {k:.0f}")
+    if d is not None:
+        parts.append(f"%D {d:.0f}")
+    return f"   스토캐스틱: {' | '.join(parts)}"
+
+
+def _format_obv_line(obv: Optional[Dict]) -> Optional[str]:
+    """OBV 라인"""
+    if not obv:
+        return None
+    trend = obv.get('trend')
+    if trend is None:
+        return None
+    return f"   OBV: {trend}"
+
+
+def _format_atr_line(atr) -> Optional[str]:
+    """ATR 라인"""
+    if atr is None:
+        return None
+    return f"   ATR: {atr:,.0f}"
 
 
 def _fear_greed_label(score: float) -> str:

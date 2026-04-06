@@ -494,6 +494,14 @@ def get_technical_indicators(ticker: str, hist_data: Optional[pd.DataFrame] = No
         # MACD 계산
         macd_data = calculate_macd(closes)
 
+        # 추가 기술적 지표
+        bollinger = calculate_bollinger_bands(closes)
+        stochastic = calculate_stochastic(hist)
+        obv = calculate_obv(hist)
+        atr = calculate_atr(hist)
+        golden_dead_cross = detect_golden_dead_cross(closes)
+        volume_spike = detect_volume_spike(hist)
+
         return {
             'rsi': rsi,
             'ma20': ma20,
@@ -504,7 +512,13 @@ def get_technical_indicators(ticker: str, hist_data: Optional[pd.DataFrame] = No
             'macd': macd_data.get('macd_line'),
             'macd_signal': macd_data.get('signal_line'),
             'macd_histogram': macd_data.get('histogram'),
-            'macd_trend': macd_data.get('trend')
+            'macd_trend': macd_data.get('trend'),
+            'bollinger': bollinger,
+            'stochastic': stochastic,
+            'obv': obv,
+            'atr': atr,
+            'golden_dead_cross': golden_dead_cross,
+            'volume_spike': volume_spike
         }
     except Exception as e:
         logger.error(f"{ticker} 기술적 지표 계산 실패: {e}")
@@ -684,7 +698,16 @@ def calculate_returns(ticker: str) -> Dict:
     # 기술적 지표 계산 (이미 가져온 데이터 재사용하여 중복 호출 방지)
     technical = get_technical_indicators(ticker, hist_data=data)
     result['technical'] = technical
-    
+
+    # 밸류에이션 지표
+    result['valuation'] = get_valuation(ticker)
+
+    # 공매도 비율
+    result['short_selling'] = get_short_selling_ratio(ticker)
+
+    # 리스크 지표
+    result['risk_metrics'] = calculate_risk_metrics(data)
+
     # 국내 주식인 경우 수급 데이터, ETF 괴리율, 거래량 수집
     if '.KS' in ticker or '.KQ' in ticker:
         try:
@@ -1147,6 +1170,431 @@ def calculate_indicators(hist: pd.DataFrame) -> Dict:
     except Exception as e:
         logger.debug(f"지표 계산 오류: {e}")
         return {}
+
+
+def calculate_bollinger_bands(prices: pd.Series, period: int = 20, std_dev: int = 2) -> Optional[Dict]:
+    """
+    볼린저 밴드 계산
+
+    Args:
+        prices: 종가 시리즈
+        period: 이동평균 기간 (기본값: 20)
+        std_dev: 표준편차 배수 (기본값: 2)
+
+    Returns:
+        {'upper', 'middle', 'lower', 'bandwidth', 'percent_b', 'squeeze'} 또는 None
+    """
+    try:
+        if prices is None or len(prices) < period:
+            return None
+
+        middle = prices.rolling(window=period).mean()
+        std = prices.rolling(window=period).std()
+
+        upper = middle + std_dev * std
+        lower = middle - std_dev * std
+
+        current_upper = float(upper.iloc[-1])
+        current_middle = float(middle.iloc[-1])
+        current_lower = float(lower.iloc[-1])
+        current_price = float(prices.iloc[-1])
+
+        bandwidth = (current_upper - current_lower) / current_middle * 100 if current_middle != 0 else 0
+        percent_b = (current_price - current_lower) / (current_upper - current_lower) * 100 if (current_upper - current_lower) != 0 else 50
+
+        # squeeze 판단: 최근 bandwidth가 6개월 내 최저 수준 (하위 20%)인지
+        bw_series = (upper - lower) / middle * 100
+        bw_recent = bw_series.dropna()
+        squeeze = False
+        if len(bw_recent) >= period:
+            threshold = bw_recent.quantile(0.2)
+            squeeze = float(bw_series.iloc[-1]) <= float(threshold)
+
+        return {
+            'upper': round(current_upper, 2),
+            'middle': round(current_middle, 2),
+            'lower': round(current_lower, 2),
+            'bandwidth': round(bandwidth, 2),
+            'percent_b': round(percent_b, 2),
+            'squeeze': squeeze
+        }
+    except Exception as e:
+        logger.error(f"볼린저 밴드 계산 실패: {e}")
+        return None
+
+
+def calculate_stochastic(hist_data: pd.DataFrame, k_period: int = 14, d_period: int = 3) -> Optional[Dict]:
+    """
+    스토캐스틱 오실레이터 (%K, %D) 계산
+
+    Args:
+        hist_data: OHLCV DataFrame
+        k_period: %K 기간 (기본값: 14)
+        d_period: %D 기간 (기본값: 3)
+
+    Returns:
+        {'k': %K 값, 'd': %D 값} 또는 None
+    """
+    try:
+        if hist_data is None or len(hist_data) < k_period + d_period:
+            return None
+
+        low_min = hist_data['Low'].rolling(window=k_period).min()
+        high_max = hist_data['High'].rolling(window=k_period).max()
+
+        denom = high_max - low_min
+        k = ((hist_data['Close'] - low_min) / denom) * 100
+        k = k.replace([np.inf, -np.inf], np.nan)
+        d = k.rolling(window=d_period).mean()
+
+        k_val = float(k.iloc[-1])
+        d_val = float(d.iloc[-1])
+
+        if pd.isna(k_val) or pd.isna(d_val):
+            return None
+
+        return {
+            'k': round(k_val, 2),
+            'd': round(d_val, 2)
+        }
+    except Exception as e:
+        logger.error(f"스토캐스틱 계산 실패: {e}")
+        return None
+
+
+def calculate_obv(hist_data: pd.DataFrame) -> Optional[Dict]:
+    """
+    OBV (On-Balance Volume) 계산
+
+    Args:
+        hist_data: OHLCV DataFrame
+
+    Returns:
+        {'obv': 현재 OBV, 'obv_trend': '상승'/'하락'/'횡보'} 또는 None
+    """
+    try:
+        if hist_data is None or len(hist_data) < 20:
+            return None
+
+        close = hist_data['Close']
+        volume = hist_data['Volume']
+
+        direction = np.sign(close.diff())
+        obv = (direction * volume).cumsum()
+
+        current_obv = float(obv.iloc[-1])
+
+        # 추세 판단: 최근 10일 OBV 선형회귀 기울기
+        recent_obv = obv.iloc[-10:].values
+        x = np.arange(len(recent_obv))
+        if len(recent_obv) >= 10:
+            slope = np.polyfit(x, recent_obv, 1)[0]
+            avg_vol = volume.iloc[-20:].mean()
+            if avg_vol > 0:
+                normalized_slope = slope / float(avg_vol)
+                if normalized_slope > 0.1:
+                    trend = '상승'
+                elif normalized_slope < -0.1:
+                    trend = '하락'
+                else:
+                    trend = '횡보'
+            else:
+                trend = '횡보'
+        else:
+            trend = '횡보'
+
+        return {
+            'obv': round(current_obv),
+            'obv_trend': trend
+        }
+    except Exception as e:
+        logger.error(f"OBV 계산 실패: {e}")
+        return None
+
+
+def calculate_atr(hist_data: pd.DataFrame, period: int = 14) -> Optional[float]:
+    """
+    ATR (Average True Range) 계산
+
+    Args:
+        hist_data: OHLCV DataFrame
+        period: ATR 기간 (기본값: 14)
+
+    Returns:
+        ATR 값 또는 None
+    """
+    try:
+        if hist_data is None or len(hist_data) < period + 1:
+            return None
+
+        high = hist_data['High']
+        low = hist_data['Low']
+        close = hist_data['Close']
+
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+
+        val = float(atr.iloc[-1])
+        return round(val, 2) if not pd.isna(val) else None
+    except Exception as e:
+        logger.error(f"ATR 계산 실패: {e}")
+        return None
+
+
+def detect_golden_dead_cross(prices: pd.Series, short: int = 50, long: int = 200) -> Optional[Dict]:
+    """
+    골든크로스/데드크로스 감지 (최근 10일 이내)
+
+    Args:
+        prices: 종가 시리즈
+        short: 단기 이동평균 기간 (기본값: 50)
+        long: 장기 이동평균 기간 (기본값: 200)
+
+    Returns:
+        {'cross_type': 'golden'/'dead'/None, 'days_since': 경과일} 또는 None
+    """
+    try:
+        if prices is None or len(prices) < long + 10:
+            return None
+
+        ma_short = prices.rolling(window=short).mean()
+        ma_long = prices.rolling(window=long).mean()
+
+        diff = ma_short - ma_long
+        # 최근 11일치 (10일 이내 크로스 감지용)
+        recent_diff = diff.iloc[-11:]
+
+        cross_type = None
+        days_since = None
+
+        for i in range(1, len(recent_diff)):
+            prev = recent_diff.iloc[i - 1]
+            curr = recent_diff.iloc[i]
+            if pd.isna(prev) or pd.isna(curr):
+                continue
+            if prev <= 0 < curr:
+                cross_type = 'golden'
+                days_since = len(recent_diff) - 1 - i
+            elif prev >= 0 > curr:
+                cross_type = 'dead'
+                days_since = len(recent_diff) - 1 - i
+
+        return {
+            'cross_type': cross_type,
+            'days_since': days_since
+        }
+    except Exception as e:
+        logger.error(f"골든/데드 크로스 감지 실패: {e}")
+        return None
+
+
+def detect_volume_spike(hist_data: pd.DataFrame, threshold: float = 2.0) -> Optional[Dict]:
+    """
+    거래량 급증 감지
+
+    Args:
+        hist_data: OHLCV DataFrame
+        threshold: 20일 평균 대비 배수 기준 (기본값: 2.0)
+
+    Returns:
+        {'is_spike': bool, 'ratio': 배수} 또는 None
+    """
+    try:
+        if hist_data is None or len(hist_data) < 21:
+            return None
+
+        volume = hist_data['Volume']
+        avg_20 = float(volume.iloc[-21:-1].mean())
+        current_vol = float(volume.iloc[-1])
+
+        if avg_20 <= 0:
+            return None
+
+        ratio = current_vol / avg_20
+
+        return {
+            'is_spike': ratio >= threshold,
+            'ratio': round(ratio, 2)
+        }
+    except Exception as e:
+        logger.error(f"거래량 급증 감지 실패: {e}")
+        return None
+
+
+def get_short_selling_ratio(ticker: str) -> Optional[Dict]:
+    """
+    공매도 비율 조회 (pykrx 사용)
+
+    Args:
+        ticker: 주식 티커 심볼 (예: '005930.KS')
+
+    Returns:
+        {'short_ratio': 공매도 비율, 'short_volume': 공매도 수량} 또는 None
+    """
+    try:
+        if '.KS' not in ticker and '.KQ' not in ticker:
+            return None
+
+        code = ticker.replace('.KS', '').replace('.KQ', '')
+
+        from pykrx import stock
+        today = datetime.now().strftime('%Y%m%d')
+        start = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
+
+        df = stock.get_shorting_status_by_date(start, today, code)
+        if df is None or df.empty:
+            return None
+
+        latest = df.iloc[-1]
+        short_volume = int(latest.get('공매도거래량', 0) or 0)
+        total_volume = int(latest.get('총거래량', 0) or 0)
+
+        short_ratio = (short_volume / total_volume * 100) if total_volume > 0 else 0
+
+        return {
+            'short_ratio': round(short_ratio, 2),
+            'short_volume': short_volume
+        }
+    except Exception as e:
+        logger.debug(f"{ticker} 공매도 비율 조회 실패: {e}")
+        return None
+
+
+def get_valuation(ticker: str) -> Optional[Dict]:
+    """
+    밸류에이션 지표 조회 (PER, PBR, EPS, 배당수익률)
+    pykrx 우선, 실패 시 yfinance fallback
+
+    Args:
+        ticker: 주식 티커 심볼
+
+    Returns:
+        {'per', 'pbr', 'eps', 'div_yield'} 또는 None
+    """
+    # 국내 주식: pykrx 시도
+    if '.KS' in ticker or '.KQ' in ticker:
+        try:
+            code = ticker.replace('.KS', '').replace('.KQ', '')
+            from pykrx import stock
+            today = datetime.now().strftime('%Y%m%d')
+            start = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
+
+            df = stock.get_market_fundamental_by_date(start, today, code)
+            if df is not None and not df.empty:
+                latest = df.iloc[-1]
+                return {
+                    'per': round(float(latest.get('PER', 0) or 0), 2),
+                    'pbr': round(float(latest.get('PBR', 0) or 0), 2),
+                    'eps': int(latest.get('EPS', 0) or 0),
+                    'div_yield': round(float(latest.get('DIV', 0) or 0), 2)
+                }
+        except Exception as e:
+            logger.debug(f"{ticker} pykrx 밸류에이션 조회 실패, yfinance fallback: {e}")
+
+    # yfinance fallback
+    try:
+        stock_obj = yf.Ticker(ticker)
+        info = stock_obj.info
+        if info:
+            return {
+                'per': round(float(info.get('trailingPE') or 0), 2),
+                'pbr': round(float(info.get('priceToBook') or 0), 2),
+                'eps': round(float(info.get('trailingEps') or 0), 2),
+                'div_yield': round(float(info.get('dividendYield') or 0) * 100, 2)
+            }
+    except Exception as e:
+        logger.debug(f"{ticker} yfinance 밸류에이션 조회 실패: {e}")
+
+    return None
+
+
+def calculate_risk_metrics(hist_data: pd.DataFrame) -> Optional[Dict]:
+    """
+    리스크 지표 계산 (3개월 MDD, 베타, 샤프비율)
+
+    Args:
+        hist_data: OHLCV DataFrame (최소 60일 이상)
+
+    Returns:
+        {'mdd_3m': 3개월 MDD(%), 'beta': KOSPI 대비 베타, 'sharpe': 연율화 샤프비율} 또는 None
+    """
+    try:
+        if hist_data is None or len(hist_data) < 60:
+            return None
+
+        close = hist_data['Close']
+
+        # 3개월 MDD
+        close_3m = close.iloc[-60:]
+        cummax = close_3m.cummax()
+        drawdown = (close_3m - cummax) / cummax * 100
+        mdd_3m = float(drawdown.min())
+
+        # 일간 수익률
+        daily_returns = close.pct_change().dropna()
+        if len(daily_returns) < 60:
+            return {'mdd_3m': round(mdd_3m, 2), 'beta': None, 'sharpe': None}
+
+        # 베타: KOSPI 대비
+        beta = None
+        try:
+            # pykrx로 KOSPI 일간 데이터 가져오기 시도
+            from pykrx import stock as pykrx_stock
+            start = hist_data.index[0].strftime('%Y%m%d')
+            end = hist_data.index[-1].strftime('%Y%m%d')
+            kospi = pykrx_stock.get_index_ohlcv_by_date(start, end, "1001")
+            if kospi is not None and not kospi.empty and '종가' in kospi.columns:
+                kospi_returns = kospi['종가'].pct_change().dropna()
+                # 인덱스 정렬
+                common_idx = daily_returns.index.intersection(kospi_returns.index)
+                if len(common_idx) >= 30:
+                    r_stock = daily_returns.loc[common_idx]
+                    r_market = kospi_returns.loc[common_idx]
+                    cov = np.cov(r_stock.values, r_market.values)
+                    market_var = cov[1][1]
+                    if market_var > 0:
+                        beta = round(float(cov[0][1] / market_var), 2)
+        except Exception as e:
+            logger.debug(f"KOSPI 베타 계산 실패 (pykrx): {e}")
+
+        # pykrx 실패 시 yfinance ^KS11 fallback
+        if beta is None:
+            try:
+                kospi_ticker = yf.Ticker("^KS11")
+                kospi_hist = kospi_ticker.history(period="1y", auto_adjust=True)
+                if kospi_hist is not None and not kospi_hist.empty:
+                    kospi_returns = kospi_hist['Close'].pct_change().dropna()
+                    common_idx = daily_returns.index.intersection(kospi_returns.index)
+                    if len(common_idx) >= 30:
+                        r_stock = daily_returns.loc[common_idx]
+                        r_market = kospi_returns.loc[common_idx]
+                        cov = np.cov(r_stock.values, r_market.values)
+                        market_var = cov[1][1]
+                        if market_var > 0:
+                            beta = round(float(cov[0][1] / market_var), 2)
+            except Exception as e:
+                logger.debug(f"KOSPI 베타 계산 실패 (yfinance): {e}")
+
+        # 샤프비율 (연율화, 무위험수익률 3.5%)
+        risk_free_daily = 0.035 / 252
+        excess_returns = daily_returns - risk_free_daily
+        sharpe = None
+        std = float(excess_returns.std())
+        if std > 0:
+            sharpe = round(float(excess_returns.mean() / std * np.sqrt(252)), 2)
+
+        return {
+            'mdd_3m': round(mdd_3m, 2),
+            'beta': beta,
+            'sharpe': sharpe
+        }
+    except Exception as e:
+        logger.error(f"리스크 지표 계산 실패: {e}")
+        return None
 
 
 def get_tradingview_technical_summary(tickers: List[str]) -> str:
