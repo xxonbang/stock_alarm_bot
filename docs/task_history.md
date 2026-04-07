@@ -2,6 +2,10 @@
 
 ## 2026-04-06
 
+### [진단] AI 프롬프트 품질 고도화 리서치 (2026-04-06 23:30 KST)
+- 변경 파일: `docs/research/2026-04-06-ai-prompt-enhancement.md`
+- 내용: 10개 카테고리(CoT/ToT/Self-Consistency, 편향교정, 페르소나, 인과분석, 리스크정량화, 멀티에이전트, 뉴스해석, 매크로내러티브, Confidence Calibration, 기타) 웹 리서치. 구체적 프롬프트 예시 및 우선순위 정리.
+
 ### [기능] 리포트 투자 지표 고도화 (2026-04-06 22:30 KST)
 - 변경 파일: `src/analysis.py`, `src/alert_engine.py`
 - 내용:
