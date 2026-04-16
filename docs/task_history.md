@@ -1,5 +1,31 @@
 # Task History
 
+## 2026-04-16
+
+### [기능] P2 — Yellow 모드 추가 (2026-04-16 11:10 KST)
+- 커밋: 95dc751
+- 변경 파일: `src/alert_engine.py`, `src/main.py`
+- 내용: normal/yellow/alert/weekly 4단계 모드 체계. THRESHOLDS에 yellow 임계값 7개 추가 (VIX 20, 환율 7원, 금리 4.2%, RSI 65/35, F&G 30/70, 일간 변동 1.5%). `determine_mode()` → 3-tuple 리턴 `(mode, alerts, yellow_notes)`. yellow 시 `⭐ 오늘의 주목 포인트` 섹션 자동 삽입. AI 호출 없음.
+
+### [기능] P1 — 동적 헤드라인 + 톤 전환 (2026-04-16 11:00 KST)
+- 커밋: e3d448e
+- 변경 파일: `src/alert_engine.py`
+- 내용:
+  1. 첫 줄을 시그널 스코어 기반 동적 헤드라인으로 교체 (수급·RSI·변동률 상위 2개)
+  2. "특이사항 없는 하루" 고정 문구 완전 제거
+  3. `📌` 데이터 요약 + `🔎` 관찰·행동 2줄로 대체 (regime × RSI 12개 템플릿)
+
+### [기능] 포트폴리오 종목 수정(Update) 기능 (2026-04-16 10:55 KST)
+- 커밋: ed95038
+- 변경 파일: `src/portfolio_manager.py`, `src/telegram_bot.py`
+- 내용: `PortfolioManager.update(id, field, value)` 메서드 추가. `/pf` 봇에 "수정" 버튼 + 4개 상태(SELECT_STOCK/FIELD/INPUT/CONFIRM) 추가. 매수가·수량·매수일자 개별 필드 수정 지원.
+
+### [버그픽스] P0 — 보유·관심 종목 분석 대상 편입 (2026-04-16 10:45 KST)
+- 커밋: 5b6e455
+- 변경 파일: `config/ticker_names.py`, `src/main.py`, `src/alert_engine.py`
+- 내용: `_extract_stock_analysis_results()`가 `interest_domestic`만 참조하던 것을 `possession+interest` 병합. alert_engine.py 3곳의 `'000660'` 하드코딩 제거. 셀트리온 티커명 매핑 추가.
+- 원인: Supabase primary 로드 후 모든 종목이 possession 카테고리로 분류되었으나 코드는 interest만 참조
+
 ## 2026-04-15
 
 ### [진단] 포트폴리오 Update UX 리서치 (2026-04-15 15:30 KST)
