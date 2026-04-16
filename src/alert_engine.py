@@ -165,6 +165,139 @@ def _get_market_regime(
         return "방어 모드", "🔴"
 
 
+# 관찰·행동 템플릿 (regime × RSI level)
+_OBSERVATION_TEMPLATES = {
+    ("적극 공격", "high"): "단기 과열 주의. 급등 시 분할 익절 검토.",
+    ("적극 공격", "mid"): "상승 추세 건재. 눌림 시 추가 진입 가능.",
+    ("적극 공격", "low"): "과매도 구간에서 시장 강세. 반등 기대.",
+    ("선별 매수", "high"): "RSI 높은 편. 추격 매수 자제, 보유 유지.",
+    ("선별 매수", "mid"): "중립 구간. 기준 철회 매도세 없으면 보유 유지.",
+    ("선별 매수", "low"): "과매도 접근. 분할매수 검토 가능.",
+    ("약세 경계", "high"): "약세장 과열. 단기 반락 가능성 높음.",
+    ("약세 경계", "mid"): "방어 우선. 추가 진입은 F&G 반등 후.",
+    ("약세 경계", "low"): "공포 구간. 현금 비중 유지, 역발상 진입은 신중히.",
+    ("방어 모드", "high"): "극단 변동. 포지션 축소 우선.",
+    ("방어 모드", "mid"): "불확실성 높음. 관망 유지.",
+    ("방어 모드", "low"): "극단적 공포. 장기 관점 분할매수 대기.",
+}
+
+
+def _get_rsi_level(stock_results: List[Dict]) -> str:
+    """stock_results의 평균 RSI 레벨"""
+    rsis = [r.get('technical', {}).get('rsi') for r in stock_results]
+    rsis = [r for r in rsis if r is not None]
+    if not rsis:
+        return "mid"
+    avg = sum(rsis) / len(rsis)
+    if avg >= 65:
+        return "high"
+    elif avg <= 35:
+        return "low"
+    return "mid"
+
+
+def _generate_summary_line(stock_results: List[Dict]) -> str:
+    """종목별 핵심 시그널 1줄 요약"""
+    from config.ticker_names import get_ticker_name
+    parts = []
+    for r in stock_results:
+        ticker = r.get('ticker', '')
+        name = get_ticker_name(ticker) or ticker
+        short_name = name[:4] if len(name) > 4 else name
+
+        tech = r.get('technical', {})
+        rsi = tech.get('rsi')
+        supply = r.get('supply_demand_1d', {})
+        foreign = supply.get('foreign')
+        daily = r.get('returns', {}).get('1D')
+
+        signals = []
+        if rsi is not None:
+            if rsi >= 70:
+                signals.append(f"RSI {rsi:.0f}(과열)")
+            elif rsi <= 30:
+                signals.append(f"RSI {rsi:.0f}(과매도)")
+            else:
+                signals.append(f"RSI {rsi:.0f}")
+
+        if foreign is not None and not _is_previous_day_data(supply):
+            f_dir = "순매수" if foreign > 0 else "순매도"
+            signals.append(f"외인 {f_dir}")
+
+        if daily is not None and abs(daily) >= 1.0:
+            signals.append(f"{daily:+.1f}%")
+
+        if signals:
+            parts.append(f"{short_name} {' · '.join(signals)}")
+
+    if not parts:
+        return "주요 변동 없음"
+    return ", ".join(parts)
+
+
+def _generate_headline(
+    stock_results: List[Dict],
+    regime_emoji: str,
+    usdkrw: Optional[float] = None,
+    vix_value: Optional[float] = None,
+    us10y: Optional[float] = None,
+) -> str:
+    """동적 헤드라인 (텔레그램 peek에 보이는 첫 줄)"""
+    from config.ticker_names import get_ticker_name
+    candidates = []
+
+    for r in stock_results:
+        ticker = r.get('ticker', '')
+        name = get_ticker_name(ticker) or ticker
+        short = name[:4] if len(name) > 4 else name
+        tech = r.get('technical', {})
+        rsi = tech.get('rsi')
+        supply = r.get('supply_demand_1d', {})
+        daily = r.get('returns', {}).get('1D')
+        foreign = supply.get('foreign')
+        institutional = supply.get('institutional')
+
+        if rsi is not None:
+            if rsi >= 65:
+                candidates.append((abs(rsi - 50), f"{short} RSI {rsi:.0f}(과열 주의)"))
+            elif rsi <= 35:
+                candidates.append((abs(rsi - 50), f"{short} RSI {rsi:.0f}(과매도)"))
+
+        if daily is not None and abs(daily) >= 1.5:
+            candidates.append((abs(daily) * 5, f"{short} {daily:+.1f}%"))
+
+        if foreign is not None and not _is_previous_day_data(supply):
+            if abs(foreign) >= 5:
+                f_dir = "외인 순매수" if foreign > 0 else "외인 순매도"
+                candidates.append((abs(foreign), f"{short} {f_dir} {abs(foreign):.0f}만주"))
+
+        if (foreign is not None and institutional is not None
+                and not _is_previous_day_data(supply)
+                and round(foreign) > 0 and round(institutional) > 0):
+            candidates.append((30, f"{short} 외인+기관 쌍끌이"))
+
+    if vix_value is not None and vix_value >= 20:
+        candidates.append((vix_value - 15, f"VIX {vix_value:.1f}"))
+    if us10y is not None and us10y >= 4.3:
+        candidates.append((10, f"미10Y {us10y:.2f}%"))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+
+    if candidates:
+        top = [c[1] for c in candidates[:2]]
+        return f"{regime_emoji} {' | '.join(top)}"
+
+    # fallback: 첫 종목 현재가
+    if stock_results:
+        first = stock_results[0]
+        name = get_ticker_name(first.get('ticker', '')) or first.get('ticker', '')
+        price = first.get('current_price', 0)
+        if isinstance(price, (int, float)):
+            return f"{regime_emoji} {name} {price:,.0f}원"
+
+    return f"{regime_emoji} 시장 동향"
+
+
 def generate_normal_message(
     stock_results: List[Dict],
     macro_text: str,
@@ -188,13 +321,18 @@ def generate_normal_message(
     regime_name, regime_emoji = _get_market_regime(fear_greed_score, vix_value, nq_change_pct)
 
     lines = []
-    lines.append(f"📅 {date_str} ({weekday}) {time_str} KST")
-    lines.append("")
 
+    # 동적 헤드라인 (텔레그램 peek에 보이는 첫 줄)
     if is_evening:
-        lines.append(f"{regime_emoji} <b>장 마감 리포트</b>")
+        headline = f"{regime_emoji} <b>장 마감 리포트</b>"
     else:
-        lines.append(f"{regime_emoji} <b>오전 리포트</b> — 시장 {regime_name}")
+        headline = _generate_headline(
+            stock_results, regime_emoji,
+            usdkrw=usdkrw, vix_value=vix_value, us10y=us10y,
+        )
+    lines.append(headline)
+    lines.append("")
+    lines.append(f"📅 {date_str} ({weekday}) {time_str} — 시장 {regime_name}")
     lines.append("")
 
     # 매크로 핵심 지표
@@ -348,11 +486,18 @@ def generate_normal_message(
 
         lines.append("")
 
-    # 종합 판단
-    if not is_evening:
-        lines.append("💡 특이사항 없는 하루입니다. 편안하게 지켜보셔도 됩니다.")
+    # 데이터 요약 + 관찰·행동
+    summary = _generate_summary_line(stock_results)
+    lines.append(f"📌 {summary}")
+
+    observation = _OBSERVATION_TEMPLATES.get(
+        (regime_name, _get_rsi_level(stock_results)),
+        "시장 상황을 지켜보며 기존 전략 유지.",
+    )
+    if is_evening:
+        lines.append(f"🔎 {observation} 오늘 하루 수고하셨습니다.")
     else:
-        lines.append("💡 오늘 하루 수고하셨습니다. 내일도 좋은 장이 되길 바랍니다.")
+        lines.append(f"🔎 {observation}")
 
     return ["\n".join(lines)]
 
