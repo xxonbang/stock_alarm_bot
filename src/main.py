@@ -121,9 +121,14 @@ def _parse_macro_values(macro_text: str) -> dict:
 
 
 def _extract_stock_analysis_results() -> list:
-    """관심 종목(SK하이닉스)의 분석 결과를 추출"""
+    """보유·관심 국내 종목의 분석 결과를 추출"""
     from src.analysis import analyze_all_tickers
-    tickers = settings.tickers_interest_domestic
+    tickers = (
+        settings.tickers_possession_domestic
+        + settings.tickers_interest_domestic
+    )
+    # 중복 제거 (순서 유지)
+    tickers = list(dict.fromkeys(tickers))
     if not tickers:
         return []
 
@@ -225,7 +230,10 @@ def main():
         logger.info("\n[Step 1-1] 듀얼 소스 배치 수집...")
         try:
             from src.crawler import prefetch_dual_source_batch
-            all_tickers = settings.tickers_interest_domestic.copy()
+            all_tickers = list(dict.fromkeys(
+                settings.tickers_possession_domestic
+                + settings.tickers_interest_domestic
+            ))
             if all_tickers:
                 prefetch_dual_source_batch(all_tickers)
                 logger.info("듀얼 소스 배치 수집 완료")

@@ -216,20 +216,21 @@ def generate_normal_message(
         lines.append(" | ".join(macro_parts))
         lines.append("")
 
-    # SK하이닉스 상세 현황
+    # 종목별 상세 현황
+    from config.ticker_names import get_ticker_name
     for result in stock_results:
         ticker = result.get('ticker', '')
-        if '000660' not in ticker:
+        if not ticker:
             continue
 
-        from config.ticker_names import get_ticker_name
-        name = get_ticker_name(ticker) or "SK하이닉스"
+        name = get_ticker_name(ticker) or ticker
+        ticker_code = ticker.split('.')[0]
         price = result.get('current_price', 0)
         returns = result.get('returns', {})
         technical = result.get('technical', {})
         supply = result.get('supply_demand_1d', {})
 
-        lines.append(f"━━ <b>{name}(000660)</b> 상세 현황 ━━")
+        lines.append(f"━━ <b>{name}({ticker_code})</b> 상세 현황 ━━")
         lines.append("")
 
         # 가격 + 등락
@@ -411,20 +412,21 @@ def generate_alert_messages(
         msg1_lines.append(" | ".join(macro_parts))
         msg1_lines.append("")
 
-    # SK하이닉스 상세
+    # 종목별 상세
+    from config.ticker_names import get_ticker_name
     for result in stock_results:
         ticker = result.get('ticker', '')
-        if '000660' not in ticker:
+        if not ticker:
             continue
 
-        from config.ticker_names import get_ticker_name
-        name = get_ticker_name(ticker) or "SK하이닉스"
+        name = get_ticker_name(ticker) or ticker
+        ticker_code = ticker.split('.')[0]
         price = result.get('current_price', 0)
         returns = result.get('returns', {})
         technical = result.get('technical', {})
         supply = result.get('supply_demand_1d', {})
 
-        msg1_lines.append(f"━━ <b>{name}(000660)</b> 현황 ━━")
+        msg1_lines.append(f"━━ <b>{name}({ticker_code})</b> 현황 ━━")
         msg1_lines.append("")
 
         daily = returns.get('1D')
@@ -567,7 +569,7 @@ def generate_weekly_messages(
     msg1_lines.append("")
     msg1_lines.append("📋 <b>주간 점검 리포트</b>")
     msg1_lines.append("")
-    msg1_lines.append("한 주의 시작입니다. SK하이닉스와 반도체 업종의 흐름을 꼼꼼히 점검해볼게요.")
+    msg1_lines.append("한 주의 시작입니다. 보유·관심 종목의 흐름을 꼼꼼히 점검해볼게요.")
     msg1_lines.append("")
 
     # 매크로 주간 추이
@@ -586,20 +588,21 @@ def generate_weekly_messages(
         msg1_lines.append(f"  나스닥 선물: {nq_change_pct:+.1f}%")
     msg1_lines.append("")
 
-    # SK하이닉스 상세
+    # 종목별 주간 점검
+    from config.ticker_names import get_ticker_name
     for result in stock_results:
         ticker = result.get('ticker', '')
-        if '000660' not in ticker:
+        if not ticker:
             continue
 
-        from config.ticker_names import get_ticker_name
-        name = get_ticker_name(ticker) or "SK하이닉스"
+        name = get_ticker_name(ticker) or ticker
+        ticker_code = ticker.split('.')[0]
         price = result.get('current_price', 0)
         returns = result.get('returns', {})
         technical = result.get('technical', {})
         supply = result.get('supply_demand_1d', {})
 
-        msg1_lines.append(f"━━ <b>{name}(000660)</b> 주간 점검 ━━")
+        msg1_lines.append(f"━━ <b>{name}({ticker_code})</b> 주간 점검 ━━")
         msg1_lines.append("")
 
         if isinstance(price, (int, float)):

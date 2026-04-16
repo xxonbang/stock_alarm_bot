@@ -1,5 +1,20 @@
 # Task History
 
+## 2026-04-15
+
+### [진단] 포트폴리오 Update UX 리서치 (2026-04-15 15:30 KST)
+- 변경 파일: `docs/research/2026-04-15-portfolio-update.md`
+- 내용: `/pf` 봇이 CRD만 지원(Update 부재) 문제 진단. 기존 대화형 UX 유지하며 `UPDATE_SELECT_STOCK/FIELD/INPUT/CONFIRM` 4개 상태 추가안. `PortfolioManager.update(id, field, value)` API 스펙. 구현 체크리스트 8항목.
+
+### [진단] 리포트 실효성 개선 리서치 (2026-04-15 15:25 KST)
+- 변경 파일: `docs/research/2026-04-15-report-effectiveness.md`
+- 내용: "특이사항 없는 하루" 반복 원인 진단. **핵심 발견: `settings.tickers_interest_domestic`가 공백이어서 `_extract_stock_analysis_results()`가 빈 리스트 반환 → 본문 자체가 비어있음**. 4축 개선안(P0 분석대상 버그, P1 톤 전환/동적 헤드라인, P2 yellow 모드). Yellow 임계값 테이블, 관찰·행동 템플릿 12개, 헤드라인 우선순위 알고리즘.
+
+### [기능] Supabase 포트폴리오에 셀트리온 추가 (2026-04-15 15:10 KST)
+- 변경 파일: Supabase `portfolio` 테이블 (코드 변경 없음)
+- 내용: 셀트리온(068270.KS) 보유 카테고리로 추가 — 매수가 202,500원, 9주, 매수일 2026-04-15. 삼성전자(005930.KS)는 기 등록 상태 확인. 최종 보유 3종목: SK하이닉스/삼성전자/셀트리온.
+- 비고: 현재 `main.py:125-131`이 `tickers_interest_domestic`만 참조해 등록된 보유 종목이 분석 대상에 미포함 — research 문서 P0 항목으로 반영됨.
+
 ## 2026-04-06
 
 ### [진단] AI 프롬프트 품질 고도화 리서치 (2026-04-06 23:30 KST)
