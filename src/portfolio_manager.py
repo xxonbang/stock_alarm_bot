@@ -17,6 +17,9 @@ def _detect_market(ticker: str) -> str:
     return 'overseas'
 
 
+ALLOWED_UPDATE_FIELDS = {'buy_price', 'buy_quantity', 'buy_date', 'name'}
+
+
 class PortfolioManager:
     """Supabase 기반 포트폴리오 CRUD"""
 
@@ -67,6 +70,39 @@ class PortfolioManager:
             return True
         except Exception as e:
             logger.error(f"포트폴리오 추가 실패: {e}")
+            return False
+
+    def update(self, portfolio_id: str, field: str, value) -> bool:
+        """
+        포트폴리오 단일 필드 업데이트
+
+        Args:
+            portfolio_id: Supabase id (uuid)
+            field: 'buy_price' | 'buy_quantity' | 'buy_date' | 'name'
+            value: 새 값 (buy_date는 date 또는 None)
+        """
+        if not self._available:
+            logger.error("Supabase 미연결")
+            return False
+
+        if field not in ALLOWED_UPDATE_FIELDS:
+            logger.error(f"허용되지 않은 필드: {field}")
+            return False
+
+        try:
+            if field == 'buy_date':
+                payload = {field: value.isoformat() if value is not None else None}
+            else:
+                payload = {field: value}
+
+            self._client.table('portfolio') \
+                .update(payload) \
+                .eq('id', portfolio_id) \
+                .execute()
+            logger.info(f"포트폴리오 업데이트: {portfolio_id} {field}={value}")
+            return True
+        except Exception as e:
+            logger.error(f"포트폴리오 업데이트 실패: {e}")
             return False
 
     def delete(self, portfolio_id: str) -> bool:

@@ -52,7 +52,11 @@ except ImportError:
     ADD_BUY_DATE,
     DELETE_SELECT,
     DELETE_CONFIRM,
-) = range(9)
+    UPDATE_SELECT_STOCK,
+    UPDATE_SELECT_FIELD,
+    UPDATE_INPUT_VALUE,
+    UPDATE_CONFIRM,
+) = range(13)
 
 # 포트폴리오 매니저 (전역)
 pm = PortfolioManager()
@@ -78,6 +82,9 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("종목 추가", callback_data="add"),
+            InlineKeyboardButton("종목 수정", callback_data="update"),
+        ],
+        [
             InlineKeyboardButton("종목 삭제", callback_data="delete"),
         ],
     ])
@@ -188,6 +195,31 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             ]),
         )
         return ADD_CATEGORY
+
+    elif data == "update":
+        items = pm.list_by_category("possession")
+        if not items:
+            await query.edit_message_text(
+                "수정할 보유종목이 없습니다.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("< 메인메뉴", callback_data="back_main"),
+                ]]),
+            )
+            return MAIN_MENU
+
+        buttons = []
+        for item in items:
+            buttons.append([InlineKeyboardButton(
+                f"{item['name']} ({item['ticker']})",
+                callback_data=f"upd_{item['id']}",
+            )])
+        buttons.append([InlineKeyboardButton("< 메인메뉴", callback_data="cancel")])
+
+        await query.edit_message_text(
+            "수정할 종목을 선택하세요",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return UPDATE_SELECT_STOCK
 
     elif data == "delete":
         items = pm.list_all()
@@ -402,6 +434,189 @@ async def add_buy_date_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     return MAIN_MENU
 
 
+# === 종목 수정 플로우 ===
+
+_UPDATE_FIELD_LABELS = {
+    'buy_price': '매수가',
+    'buy_quantity': '수량',
+    'buy_date': '매수일자',
+}
+
+
+@_authorized
+async def update_select_stock_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """수정할 종목 선택"""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "cancel":
+        await query.edit_message_text(
+            "<b>포트폴리오 관리</b>",
+            parse_mode="HTML",
+            reply_markup=_main_menu_keyboard(),
+        )
+        return MAIN_MENU
+
+    portfolio_id = query.data.replace("upd_", "")
+    context.user_data['update_id'] = portfolio_id
+
+    items = pm.list_by_category("possession")
+    target = next((i for i in items if i['id'] == portfolio_id), None)
+    if not target:
+        await query.edit_message_text(
+            "종목을 찾을 수 없습니다.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("< 메인메뉴", callback_data="back_main"),
+            ]]),
+        )
+        return MAIN_MENU
+
+    context.user_data['update_target'] = target
+
+    text = (
+        f"<b>{target['name']}</b> ({target['ticker']})\n"
+        f"매수가: {_format_number(target.get('buy_price'))}\n"
+        f"수량: {_format_number(target.get('buy_quantity'))}\n"
+        f"매수일자: {target.get('buy_date') or '-'}\n\n"
+        f"수정할 항목을 선택하세요"
+    )
+    await query.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("매수가", callback_data="field_buy_price"),
+                InlineKeyboardButton("수량", callback_data="field_buy_quantity"),
+            ],
+            [
+                InlineKeyboardButton("매수일자", callback_data="field_buy_date"),
+                InlineKeyboardButton("< 취소", callback_data="cancel"),
+            ],
+        ]),
+    )
+    return UPDATE_SELECT_FIELD
+
+
+@_authorized
+async def update_select_field_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """수정 필드 선택"""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "cancel":
+        await query.edit_message_text(
+            "<b>포트폴리오 관리</b>",
+            parse_mode="HTML",
+            reply_markup=_main_menu_keyboard(),
+        )
+        return MAIN_MENU
+
+    field = query.data.replace("field_", "")
+    context.user_data['update_field'] = field
+
+    prompts = {
+        'buy_price': "새 매수가를 입력하세요 (숫자만)",
+        'buy_quantity': "새 수량을 입력하세요 (정수만)",
+        'buy_date': "새 매수일자를 입력하세요 (YYYY-MM-DD)\n삭제하려면: n",
+    }
+    await query.edit_message_text(prompts.get(field, "새 값을 입력하세요"))
+    return UPDATE_INPUT_VALUE
+
+
+@_authorized
+async def update_input_value_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """새 값 입력 → 확인"""
+    text = update.message.text.strip()
+    field = context.user_data['update_field']
+
+    try:
+        if field == 'buy_price':
+            new_value = float(text.replace(',', ''))
+        elif field == 'buy_quantity':
+            new_value = int(text.replace(',', ''))
+        elif field == 'buy_date':
+            if text.lower() == 'n':
+                new_value = None
+            else:
+                new_value = datetime.strptime(text, '%Y-%m-%d').date()
+        else:
+            raise ValueError(f"알 수 없는 필드: {field}")
+    except ValueError:
+        error_msgs = {
+            'buy_price': "숫자만 입력하세요. 다시 입력:",
+            'buy_quantity': "정수만 입력하세요. 다시 입력:",
+            'buy_date': "YYYY-MM-DD 형식으로 입력하세요 (삭제: n). 다시 입력:",
+        }
+        await update.message.reply_text(error_msgs.get(field, "다시 입력:"))
+        return UPDATE_INPUT_VALUE
+
+    context.user_data['update_new_value'] = new_value
+
+    target = context.user_data['update_target']
+    old_value = target.get(field)
+    label = _UPDATE_FIELD_LABELS.get(field, field)
+    display_new = _format_number(new_value) if new_value is not None else "-"
+    display_old = _format_number(old_value) if old_value is not None else "-"
+    if field == 'buy_date':
+        display_new = str(new_value) if new_value else "-"
+        display_old = str(old_value) if old_value else "-"
+
+    confirm_text = (
+        f"<b>{target['name']}</b> ({target['ticker']})\n"
+        f"{label}: {display_old} → <b>{display_new}</b>\n\n"
+        f"수정할까요?"
+    )
+    await update.message.reply_text(
+        confirm_text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("확인", callback_data="confirm_update"),
+            InlineKeyboardButton("취소", callback_data="cancel_update"),
+        ]]),
+    )
+    return UPDATE_CONFIRM
+
+
+@_authorized
+async def update_confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """수정 확인"""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "cancel_update":
+        await query.edit_message_text(
+            "<b>포트폴리오 관리</b>",
+            parse_mode="HTML",
+            reply_markup=_main_menu_keyboard(),
+        )
+        return MAIN_MENU
+
+    portfolio_id = context.user_data['update_id']
+    field = context.user_data['update_field']
+    new_value = context.user_data['update_new_value']
+
+    success = pm.update(portfolio_id, field, new_value)
+
+    if success:
+        target = context.user_data['update_target']
+        label = _UPDATE_FIELD_LABELS.get(field, field)
+        display_new = _format_number(new_value) if new_value is not None else "-"
+        if field == 'buy_date':
+            display_new = str(new_value) if new_value else "-"
+        text = f"수정 완료!\n<b>{target['name']}</b> {label}: <b>{display_new}</b>"
+    else:
+        text = "수정 실패. Supabase 연결을 확인하세요."
+
+    await query.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("< 메인메뉴", callback_data="back_main"),
+        ]]),
+    )
+    return MAIN_MENU
+
+
 # === 종목 삭제 플로우 ===
 
 @_authorized
@@ -536,6 +751,18 @@ def main():
             ],
             DELETE_CONFIRM: [
                 CallbackQueryHandler(delete_confirm_handler),
+            ],
+            UPDATE_SELECT_STOCK: [
+                CallbackQueryHandler(update_select_stock_handler),
+            ],
+            UPDATE_SELECT_FIELD: [
+                CallbackQueryHandler(update_select_field_handler),
+            ],
+            UPDATE_INPUT_VALUE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, update_input_value_handler),
+            ],
+            UPDATE_CONFIRM: [
+                CallbackQueryHandler(update_confirm_handler),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
