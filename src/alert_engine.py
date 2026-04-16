@@ -29,19 +29,26 @@ def _is_previous_day_data(supply: Dict) -> bool:
 
 # 경보 임계값
 THRESHOLDS = {
+    # Alert (빨간 경보)
     'vix_red': 25,
-    'vix_yellow': 20,
     'vix_daily_change_pct': 20,
     'usdkrw_daily_change': 15,
     'us10y_red': 4.5,
     'us10y_daily_change': 0.10,
     'rsi_overbought_red': 80,
-    'rsi_overbought_yellow': 70,
     'rsi_oversold_red': 25,
-    'rsi_oversold_yellow': 30,
     'fear_greed_extreme_fear': 20,
     'fear_greed_extreme_greed': 80,
     'stock_daily_change_pct': 3.0,
+    # Yellow (노란 주의)
+    'vix_yellow': 20,
+    'usdkrw_daily_change_yellow': 7,
+    'us10y_yellow': 4.2,
+    'rsi_overbought_yellow': 65,
+    'rsi_oversold_yellow': 35,
+    'fear_greed_caution_fear': 30,
+    'fear_greed_caution_greed': 70,
+    'stock_daily_change_pct_yellow': 1.5,
 }
 
 
@@ -54,44 +61,61 @@ def determine_mode(
     usdkrw_change: Optional[float] = None,
     us10y: Optional[float] = None,
     nq_change_pct: Optional[float] = None,
-) -> Tuple[str, List[str]]:
+) -> Tuple[str, List[str], List[str]]:
     """
     리포트 모드 결정
 
     Returns:
-        (mode, alerts)
-        mode: 'normal', 'alert', 'weekly'
-        alerts: 발동된 경보 사유 리스트
+        (mode, alerts, yellow_notes)
+        mode: 'normal', 'yellow', 'alert', 'weekly'
+        alerts: 빨간 경보 사유 리스트
+        yellow_notes: 노란 주의 사유 리스트
     """
     now = datetime.now(KST)
     is_monday_morning = now.weekday() == 0 and now.hour < 12
 
     alerts = []
+    yellow_notes = []
 
     # VIX 체크
     if vix_value is not None:
         if vix_value >= THRESHOLDS['vix_red']:
             alerts.append(f"VIX {vix_value:.1f} (경계선 {THRESHOLDS['vix_red']} 돌파)")
+        elif vix_value >= THRESHOLDS['vix_yellow']:
+            yellow_notes.append(f"VIX {vix_value:.1f} 주의 구간")
 
     # 환율 체크
-    if usdkrw_change is not None and abs(usdkrw_change) >= THRESHOLDS['usdkrw_daily_change']:
-        direction = "상승" if usdkrw_change > 0 else "하락"
-        alerts.append(f"USD/KRW {direction} {abs(usdkrw_change):.0f}원")
+    if usdkrw_change is not None:
+        if abs(usdkrw_change) >= THRESHOLDS['usdkrw_daily_change']:
+            direction = "상승" if usdkrw_change > 0 else "하락"
+            alerts.append(f"USD/KRW {direction} {abs(usdkrw_change):.0f}원")
+        elif abs(usdkrw_change) >= THRESHOLDS['usdkrw_daily_change_yellow']:
+            direction = "상승" if usdkrw_change > 0 else "하락"
+            yellow_notes.append(f"환율 {direction} {abs(usdkrw_change):.0f}원")
 
     # 미 10Y 금리 체크
-    if us10y is not None and us10y >= THRESHOLDS['us10y_red']:
-        alerts.append(f"미 10Y 금리 {us10y:.2f}% (경계선 {THRESHOLDS['us10y_red']}% 돌파)")
+    if us10y is not None:
+        if us10y >= THRESHOLDS['us10y_red']:
+            alerts.append(f"미 10Y 금리 {us10y:.2f}% (경계선 {THRESHOLDS['us10y_red']}% 돌파)")
+        elif us10y >= THRESHOLDS['us10y_yellow']:
+            yellow_notes.append(f"미 10Y 금리 {us10y:.2f}% 주의")
 
-    # Fear&Greed 극단 체크
+    # Fear&Greed 체크
     if fear_greed_score is not None:
         if fear_greed_score <= THRESHOLDS['fear_greed_extreme_fear']:
             alerts.append(f"Fear&Greed {fear_greed_score:.0f} (극단적 공포)")
         elif fear_greed_score >= THRESHOLDS['fear_greed_extreme_greed']:
             alerts.append(f"Fear&Greed {fear_greed_score:.0f} (극단적 탐욕)")
+        elif fear_greed_score <= THRESHOLDS['fear_greed_caution_fear']:
+            yellow_notes.append(f"F&G {fear_greed_score:.0f} 공포 구간")
+        elif fear_greed_score >= THRESHOLDS['fear_greed_caution_greed']:
+            yellow_notes.append(f"F&G {fear_greed_score:.0f} 탐욕 구간")
 
     # 개별 종목 RSI/변동률 체크
+    from config.ticker_names import get_ticker_name
     for result in stock_results:
         ticker = result.get('ticker', '')
+        name = get_ticker_name(ticker) or ticker
         technical = result.get('technical', {})
         returns = result.get('returns', {})
         rsi = technical.get('rsi')
@@ -99,21 +123,31 @@ def determine_mode(
 
         if rsi is not None:
             if rsi >= THRESHOLDS['rsi_overbought_red']:
-                alerts.append(f"{ticker} RSI {rsi:.0f} 극단적 과열")
+                alerts.append(f"{name} RSI {rsi:.0f} 극단적 과열")
+            elif rsi >= THRESHOLDS['rsi_overbought_yellow']:
+                yellow_notes.append(f"{name} RSI {rsi:.0f} 과열 주의")
             elif rsi <= THRESHOLDS['rsi_oversold_red']:
-                alerts.append(f"{ticker} RSI {rsi:.0f} 극단적 과매도")
+                alerts.append(f"{name} RSI {rsi:.0f} 극단적 과매도")
+            elif rsi <= THRESHOLDS['rsi_oversold_yellow']:
+                yellow_notes.append(f"{name} RSI {rsi:.0f} 과매도 주의")
 
-        if daily_change is not None and abs(daily_change) >= THRESHOLDS['stock_daily_change_pct']:
-            direction = "급등" if daily_change > 0 else "급락"
-            alerts.append(f"{ticker} {direction} {daily_change:+.1f}%")
+        if daily_change is not None:
+            if abs(daily_change) >= THRESHOLDS['stock_daily_change_pct']:
+                direction = "급등" if daily_change > 0 else "급락"
+                alerts.append(f"{name} {direction} {daily_change:+.1f}%")
+            elif abs(daily_change) >= THRESHOLDS['stock_daily_change_pct_yellow']:
+                direction = "상승" if daily_change > 0 else "하락"
+                yellow_notes.append(f"{name} {direction} {daily_change:+.1f}%")
 
-    # 모드 결정
+    # 모드 결정: weekly > alert > yellow > normal
     if is_monday_morning:
-        return 'weekly', alerts
+        return 'weekly', alerts, yellow_notes
     elif alerts:
-        return 'alert', alerts
+        return 'alert', alerts, yellow_notes
+    elif yellow_notes:
+        return 'yellow', alerts, yellow_notes
     else:
-        return 'normal', alerts
+        return 'normal', alerts, yellow_notes
 
 
 def _get_market_regime(
@@ -307,6 +341,7 @@ def generate_normal_message(
     us10y: Optional[float] = None,
     nq_change_pct: Optional[float] = None,
     is_evening: bool = False,
+    yellow_notes: Optional[List[str]] = None,
 ) -> List[str]:
     """
     평시 메시지 생성 (1개 메시지, AI 호출 없음)
@@ -484,6 +519,13 @@ def generate_normal_message(
         if rl:
             lines.append(rl)
 
+        lines.append("")
+
+    # Yellow 주목 포인트 (yellow 모드일 때만)
+    if yellow_notes:
+        lines.append("⭐ <b>오늘의 주목 포인트</b>")
+        for note in yellow_notes:
+            lines.append(f"  • {note}")
         lines.append("")
 
     # 데이터 요약 + 관찰·행동

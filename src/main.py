@@ -281,7 +281,7 @@ def main():
         # Step 2: 모드 결정
         # ================================
         logger.info("\n[Step 2] 리포트 모드 결정...")
-        mode, alerts = determine_mode(
+        mode, alerts, yellow_notes = determine_mode(
             stock_results=stock_results,
             macro_text=macro_indicators,
             fear_greed_score=fear_greed_score,
@@ -291,7 +291,7 @@ def main():
             us10y=us10y,
             nq_change_pct=nq_change_pct,
         )
-        logger.info(f"📋 리포트 모드: {mode} (경보 {len(alerts)}건)")
+        logger.info(f"📋 리포트 모드: {mode} (경보 {len(alerts)}건, 주의 {len(yellow_notes)}건)")
 
         # ================================
         # Step 3: 모드별 메시지 생성
@@ -299,9 +299,9 @@ def main():
         messages = []
         token_usage = {}
 
-        if mode == 'normal':
-            # === 평시 모드: AI 호출 없음 ===
-            logger.info("\n[Step 3] 평시 모드 — AI 호출 없이 메시지 생성")
+        if mode in ('normal', 'yellow'):
+            # === 평시/주의 모드: AI 호출 없음 ===
+            logger.info(f"\n[Step 3] {mode} 모드 — AI 호출 없이 메시지 생성")
 
             messages = generate_normal_message(
                 stock_results=stock_results,
@@ -312,6 +312,7 @@ def main():
                 us10y=us10y,
                 nq_change_pct=nq_change_pct,
                 is_evening=is_evening,
+                yellow_notes=yellow_notes if mode == 'yellow' else None,
             )
 
         elif mode == 'alert':
