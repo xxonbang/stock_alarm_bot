@@ -1,5 +1,28 @@
 # Task History
 
+## 2026-04-27
+
+### [기능] 트렌드 스캐너 — 매일 07:30·20:00 자동 발송 (2026-04-27 KST)
+- 변경 파일:
+  - 신규: `src/trend_scanner.py`, `src/trend_collectors/` (base + 4개 수집기), `src/trend_extractor.py`, `src/trend_formatter.py`
+  - 신규: `config/prompts/trend_extract.txt`, `trend_top3.txt`, `trend_outlook.txt`
+  - 신규: `.github/workflows/trend_scan.yml`
+  - 신규: `tests/` (pytest 인프라 + 단위 테스트 45건)
+  - 수정: `src/ai_researcher.py` (`AIResearcher.call` 공개 메서드 추가)
+  - 수정: `requirements.txt` (pytest 추가), `.gitignore` (`.worktrees/` 추가)
+- 내용: 미국·한국 뉴스 30 + 커뮤니티 30 (총 120건) 수집 → Gemini 3콜(추출/TOP3/전망) → 텔레그램 2메시지(미국/한국) 발송. 할루시네이션 가드 3중(인덱싱/프롬프트 제약/사후 매핑 검증). cron-job.org → GitHub workflow_dispatch 트리거. 매일 발송(휴일 포함).
+- 스펙: `docs/superpowers/specs/2026-04-27-trend-scanner-design.md`
+- 계획: `docs/superpowers/plans/2026-04-27-trend-scanner.md`
+- 브랜치: `feature/trend-scanner`
+
+### [리팩토링] us_community: kwargs 기반 fetch + 점수 dict + 테스트 5개 추가 (2026-04-27 KST)
+- 커밋: 5ca00a1
+- 변경 파일: `src/trend_collectors/us_community.py`, `tests/test_us_community.py`
+- 내용:
+  1. Fix I-1: curl_cffi 유무에 따라 `_IMPERSONATE_KWARGS` dict 분기, `_fetch_subreddit`에서 `**kwargs` 방식으로 전달 (TypeError fallback 제거)
+  2. Fix M-1: `item._score` monkey-patch → `scores: dict[str, int]` 로컬 dict로 교체
+  3. Fix M-2: 테스트 5개 추가 (stickied 필터, created_utc 없는 포스트, URL 중복제거, 본문 200자 정렬, 서브 fetch 실패 격리). 9 passed.
+
 ## 2026-04-16
 
 ### [기능] P2 — Yellow 모드 추가 (2026-04-16 11:10 KST)

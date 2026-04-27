@@ -252,7 +252,37 @@ class AIResearcher:
                     return f"오류: {error_str[:500]}", {}
         
         return "오류: 최대 재시도 횟수 초과", {}
-    
+
+    def call(
+        self,
+        prompt: str,
+        system_instruction: Optional[str] = None,
+        temperature: float = 0.2,
+        max_output_tokens: int = 6000,
+        max_retries: int = 5,
+    ) -> Tuple[str, Dict]:
+        """
+        외부 모듈이 직접 호출하는 공개 진입점.
+        기존 다중 키 폴백/재시도 로직(`_call_ai`)을 그대로 사용한다.
+
+        Args:
+            prompt: 사용자 프롬프트
+            system_instruction: 시스템 인스트럭션 (할루시네이션 가드 등)
+            temperature: 응답 다양성 (트렌드 스캐너는 0.2 권장 — 객관성)
+            max_output_tokens: 최대 출력 토큰
+            max_retries: 키 폴백 포함 최대 재시도
+
+        Returns:
+            (response_text, usage_info)
+        """
+        return self._call_ai(
+            prompt=prompt,
+            max_retries=max_retries,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            system_instruction=system_instruction,
+        )
+
     def generate_briefing(self, collected_data: str) -> Tuple[str, str, Dict]:
         """
         Python이 수집한 데이터를 바탕으로 두 가지 포맷의 리포트 생성 (Compact + Detailed)

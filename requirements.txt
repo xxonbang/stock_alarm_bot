@@ -46,3 +46,6 @@ supabase>=2.0.0
 
 # 텔레그램 봇 (포트폴리오 CRUD용, polling 방식)
 python-telegram-bot>=21.0
+
+# 테스트
+pytest>=7.0
