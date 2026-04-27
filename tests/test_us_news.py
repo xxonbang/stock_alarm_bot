@@ -1,7 +1,7 @@
 """us_news collector 테스트"""
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import feedparser
 
@@ -41,9 +41,50 @@ def test_collect_sets_batch_us_news():
 
 
 def test_collect_dedupes_by_url():
-    """같은 URL이 여러 키워드 검색에서 중복 등장하면 1번만 포함"""
+    """같은 URL이 다른 키워드 검색에서 중복 등장하면 1번만 포함"""
+    import feedparser
+    feed_a = feedparser.parse("""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <item>
+    <title>Shared headline</title>
+    <link>https://example.com/shared</link>
+    <pubDate>Mon, 27 Apr 2026 06:00:00 GMT</pubDate>
+    <description>Shared body short.</description>
+  </item>
+  <item>
+    <title>Only in A</title>
+    <link>https://example.com/a-only</link>
+    <pubDate>Mon, 27 Apr 2026 06:00:00 GMT</pubDate>
+    <description>A only body.</description>
+  </item>
+</channel></rss>""")
+    feed_b = feedparser.parse("""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <item>
+    <title>Shared headline</title>
+    <link>https://example.com/shared</link>
+    <pubDate>Mon, 27 Apr 2026 06:00:00 GMT</pubDate>
+    <description>Shared body short.</description>
+  </item>
+  <item>
+    <title>Only in B</title>
+    <link>https://example.com/b-only</link>
+    <pubDate>Mon, 27 Apr 2026 06:00:00 GMT</pubDate>
+    <description>B only body.</description>
+  </item>
+</channel></rss>""")
+
     now = datetime(2026, 4, 27, 7, 30, tzinfo=timezone.utc)
-    with patch("src.trend_collectors.us_news._fetch_feed", return_value=_parsed_fixture()):
+    # KEYWORDS has 4 entries; cycle 2 distinct feeds across them
+    with patch(
+        "src.trend_collectors.us_news._fetch_feed",
+        side_effect=[feed_a, feed_b, feed_a, feed_b],
+    ):
         items = collect(now=now, limit=30)
+
     urls = [it.url for it in items]
-    assert len(urls) == len(set(urls))
+    # shared URL appears exactly once
+    assert urls.count("https://example.com/shared") == 1
+    # both unique URLs present
+    assert "https://example.com/a-only" in urls
+    assert "https://example.com/b-only" in urls

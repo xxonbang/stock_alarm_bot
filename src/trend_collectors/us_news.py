@@ -23,10 +23,9 @@ def _entry_to_item(entry, batch: str = "us_news") -> Optional[CollectedItem]:
     if not getattr(entry, "title", None) or not getattr(entry, "link", None):
         return None
     pub = getattr(entry, "published_parsed", None)
-    if pub:
-        published = datetime(*pub[:6], tzinfo=timezone.utc)
-    else:
-        published = datetime.now(timezone.utc)
+    if not pub:
+        return None
+    published = datetime(*pub[:6], tzinfo=timezone.utc)
     body = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
     return CollectedItem(
         batch=batch, idx=0,  # idx는 호출자가 부여
