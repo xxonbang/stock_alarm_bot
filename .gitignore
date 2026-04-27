@@ -48,4 +48,6 @@ test_full_run.log
 # Cache (API 토큰 등)
 .cache/
 
+# Git worktrees
+.worktrees/
 
