@@ -5,8 +5,10 @@ from typing import List, Optional
 
 try:
     from curl_cffi import requests as _requests
+    _IMPERSONATE_KWARGS = {"impersonate": "chrome120"}
 except ImportError:
     import requests as _requests
+    _IMPERSONATE_KWARGS = {}
 
 from src.trend_collectors.base import CollectedItem
 
@@ -20,11 +22,7 @@ HEADERS = {"User-Agent": "trade-info-sender/1.0 (by xxonbang)"}
 def _fetch_subreddit(sub: str) -> dict:
     """Reddit JSON 호출 (테스트에서 mock)"""
     url = ENDPOINT.format(sub=sub)
-    try:
-        # curl_cffi는 impersonate 인자 지원, requests는 미지원
-        resp = _requests.get(url, headers=HEADERS, impersonate="chrome120", timeout=15)
-    except TypeError:
-        resp = _requests.get(url, headers=HEADERS, timeout=15)
+    resp = _requests.get(url, headers=HEADERS, timeout=15, **_IMPERSONATE_KWARGS)
     resp.raise_for_status()
     return resp.json()
 
@@ -62,6 +60,7 @@ def collect(
         subreddits = DEFAULT_SUBS
 
     seen_urls = set()
+    scores: dict[str, int] = {}
     items: List[CollectedItem] = []
 
     for sub in subreddits:
@@ -78,12 +77,11 @@ def collect(
             if item.url in seen_urls:
                 continue
             seen_urls.add(item.url)
-            # 점수를 임시 어트리뷰트로 보관해 정렬에 사용
-            item._score = post.get("score", 0)  # type: ignore[attr-defined]
+            scores[item.url] = post.get("score", 0)
             items.append(item)
 
     # 본문 200자 이상 우선, 그 후 score 내림차순
-    items.sort(key=lambda x: (len(x.body) >= 200, getattr(x, "_score", 0)), reverse=True)
+    items.sort(key=lambda x: (len(x.body) >= 200, scores.get(x.url, 0)), reverse=True)
     items = items[:limit]
 
     for i, it in enumerate(items, start=1):
