@@ -1,5 +1,15 @@
 # Task History
 
+## 2026-04-27
+
+### [리팩토링] us_community: kwargs 기반 fetch + 점수 dict + 테스트 5개 추가 (2026-04-27 KST)
+- 커밋: 5ca00a1
+- 변경 파일: `src/trend_collectors/us_community.py`, `tests/test_us_community.py`
+- 내용:
+  1. Fix I-1: curl_cffi 유무에 따라 `_IMPERSONATE_KWARGS` dict 분기, `_fetch_subreddit`에서 `**kwargs` 방식으로 전달 (TypeError fallback 제거)
+  2. Fix M-1: `item._score` monkey-patch → `scores: dict[str, int]` 로컬 dict로 교체
+  3. Fix M-2: 테스트 5개 추가 (stickied 필터, created_utc 없는 포스트, URL 중복제거, 본문 200자 정렬, 서브 fetch 실패 격리). 9 passed.
+
 ## 2026-04-16
 
 ### [기능] P2 — Yellow 모드 추가 (2026-04-16 11:10 KST)
