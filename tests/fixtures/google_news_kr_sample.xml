@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+  <title>한국 증시 - Google News</title>
+  <item>
+    <title>코스피 2거래일 연속 상승</title>
+    <link>https://example.com/kr/1</link>
+    <pubDate>Mon, 27 Apr 2026 06:00:00 GMT</pubDate>
+    <description>외국인 순매수가 이어지며 코스피가 상승 마감했다.</description>
+  </item>
+  <item>
+    <title>오래된 기사</title>
+    <link>https://example.com/kr/2</link>
+    <pubDate>Thu, 23 Apr 2026 10:00:00 GMT</pubDate>
+    <description>24시간이 넘은 글.</description>
+  </item>
+</channel>
+</rss>
