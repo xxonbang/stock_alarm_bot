@@ -55,25 +55,31 @@ def _strip_codeblock(text: str) -> str:
 def _parse_json_with_retry(
     researcher,
     prompt: str,
-    max_retries: int = 2,
+    max_retries: int = 3,
     temperature: float = 0.2,
 ) -> Tuple[Dict, Dict]:
-    """LLM 응답을 JSON 파싱. 실패 시 재시도."""
+    """LLM 응답을 JSON 파싱. 실패 시 재시도 (최초 1회 + 추가 max_retries-1회)."""
     last_err = None
-    last_usage = {}
     for attempt in range(max_retries):
+        attempt_prompt = prompt
+        if attempt > 0:
+            attempt_prompt = (
+                prompt
+                + "\n\n[중요] 이전 응답이 JSON 파싱에 실패했습니다. "
+                "반드시 유효한 JSON 객체만 출력하고, "
+                "마크다운 코드블록·설명 텍스트를 포함하지 마세요."
+            )
         try:
             text, usage = researcher.call(
-                prompt=prompt,
+                prompt=attempt_prompt,
                 temperature=temperature,
                 max_output_tokens=8000,
             )
-            last_usage = usage
             cleaned = _strip_codeblock(text)
             return json.loads(cleaned), usage
-        except (json.JSONDecodeError, ValueError) as e:
+        except json.JSONDecodeError as e:
             last_err = e
-            logger.warning(f"AI JSON 파싱 실패 (시도 {attempt + 1}): {e}")
+            logger.warning(f"AI JSON 파싱 실패 (시도 {attempt + 1}/{max_retries}): {e}")
     raise RuntimeError(f"AI JSON 파싱 {max_retries}회 실패: {last_err}")
 
 
@@ -143,6 +149,12 @@ def generate_outlook(
         for it in batches.get(batch, []):
             if it.idx in idx_set:
                 referenced_items.append(it)
+
+    if not referenced_items:
+        raise RuntimeError(
+            "TOP3 결과에 참조된 인덱스가 없어 outlook 생성 불가 — "
+            "할루시네이션 방지를 위해 abort"
+        )
 
     referenced_text = format_indexed_text(referenced_items)
 

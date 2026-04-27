@@ -176,3 +176,46 @@ def test_generate_outlook_includes_only_referenced_texts():
     # 인용되지 않은 글은 미포함 (idx 1, 4, 5는 us_news에서 인용 안 됨)
     assert "[미뉴스#1]" not in prompt
     assert "us_sector_outlook" in result
+
+
+def test_generate_outlook_raises_on_empty_refs():
+    """TOP3 모든 항목의 refs가 비어 있으면 RuntimeError"""
+    import pytest
+    batches = _make_batches()
+    top3_no_refs = {
+        "us_top3_sectors": [{"name": "X", "reason": "...", "us_news_refs": [], "us_community_refs": []}],
+        "us_top3_stocks": [],
+        "kr_top3_sectors": [],
+        "kr_top3_stocks": [],
+    }
+    fake_researcher = MagicMock()
+    with pytest.raises(RuntimeError, match="참조된 인덱스가 없어"):
+        generate_outlook(top3_no_refs, batches, researcher=fake_researcher)
+    # researcher.call should NOT have been invoked
+    fake_researcher.call.assert_not_called()
+
+
+def test_parse_json_retry_appends_clarification_suffix():
+    """재시도 시 프롬프트에 clarification suffix 추가"""
+    batches = _make_batches()
+    valid = json.dumps({
+        "us_news":      {"stocks": [], "sectors": []},
+        "us_community": {"stocks": [], "sectors": []},
+        "kr_news":      {"stocks": [], "sectors": []},
+        "kr_community": {"stocks": [], "sectors": []},
+    })
+    fake_researcher = MagicMock()
+    fake_researcher.call.side_effect = [
+        ("not json", {"total_tokens": 50}),
+        (valid, {"total_tokens": 100}),
+    ]
+
+    extract_per_batch(batches, researcher=fake_researcher)
+
+    # 두 번째 호출의 프롬프트에 clarification suffix 포함
+    second_call_prompt = fake_researcher.call.call_args_list[1].kwargs["prompt"]
+    assert "JSON 파싱에 실패" in second_call_prompt
+    assert "유효한 JSON" in second_call_prompt
+    # 첫 번째 호출에는 없음
+    first_call_prompt = fake_researcher.call.call_args_list[0].kwargs["prompt"]
+    assert "JSON 파싱에 실패" not in first_call_prompt
