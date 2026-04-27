@@ -1,0 +1,45 @@
+{
+  "data": {
+    "children": [
+      {
+        "data": {
+          "id": "abc123",
+          "title": "NVDA earnings discussion",
+          "selftext": "Strong AI guidance from major cloud providers driving demand. This selftext is at least two hundred characters long to satisfy the preference filter that we are about to implement in the collector module under test today.",
+          "url": "https://reddit.com/r/wallstreetbets/comments/abc123",
+          "permalink": "/r/wallstreetbets/comments/abc123",
+          "created_utc": 1779120000,
+          "score": 1500,
+          "over_18": false,
+          "stickied": false
+        }
+      },
+      {
+        "data": {
+          "id": "def456",
+          "title": "Old post",
+          "selftext": "ancient",
+          "url": "https://reddit.com/r/wallstreetbets/comments/def456",
+          "permalink": "/r/wallstreetbets/comments/def456",
+          "created_utc": 1778000000,
+          "score": 100,
+          "over_18": false,
+          "stickied": false
+        }
+      },
+      {
+        "data": {
+          "id": "nsfw1",
+          "title": "NSFW post",
+          "selftext": "should be excluded",
+          "url": "https://reddit.com/r/wallstreetbets/comments/nsfw1",
+          "permalink": "/r/wallstreetbets/comments/nsfw1",
+          "created_utc": 1779120000,
+          "score": 50,
+          "over_18": true,
+          "stickied": false
+        }
+      }
+    ]
+  }
+}
