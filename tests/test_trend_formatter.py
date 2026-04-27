@@ -90,6 +90,27 @@ def test_format_kr_contains_top3():
     assert "반도체" in msg
 
 
+def test_format_us_falls_back_to_index_when_outlook_name_mismatches():
+    """outlook의 name이 top3와 미세하게 달라도 인덱스로 매칭"""
+    top3 = {
+        "us_top3_sectors": [{"name": "AI 인프라", "reason": "..."}],
+        "us_top3_stocks": [],
+        "kr_top3_sectors": [],
+        "kr_top3_stocks": [],
+    }
+    outlook = {
+        "us_sector_outlook": [{"name": "AI 인프라 (AI Infra)", "outlook": "내용 [미뉴스#1]"}],
+        "us_stock_outlook": [],
+        "kr_sector_outlook": [],
+        "kr_stock_outlook": [],
+    }
+    msg = format_us(NOW, top3, outlook,
+                    counts={"us_news": 30, "us_community": 30},
+                    verify_result={"ok": True, "missing": [], "total_refs": 1})
+    assert "내용 [미뉴스#1]" in msg
+    assert "(전망 누락)" not in msg
+
+
 def test_format_messages_under_4096_chars_for_typical_input():
     msg_us = format_us(NOW, _sample_top3(), _sample_outlook(), counts={"us_news": 30, "us_community": 30}, verify_result={"ok": True, "missing": [], "total_refs": 50})
     msg_kr = format_kr(NOW, _sample_top3(), _sample_outlook(), counts={"kr_news": 30, "kr_community": 30}, verify_result={"ok": True, "missing": [], "total_refs": 50})

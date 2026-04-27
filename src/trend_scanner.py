@@ -89,22 +89,42 @@ def main(test_mode: bool = False) -> int:
     counts = _counts(batches)
     logger.info(f"수집 결과: {counts}")
 
-    if all(c == 0 for c in counts.values()):
-        logger.error("모든 배치 수집 실패 — abort")
+    # 1.5. 영역별 가용성 판단
+    us_available = (counts["us_news"] + counts["us_community"]) > 0
+    kr_available = (counts["kr_news"] + counts["kr_community"]) > 0
+
+    if not us_available and not kr_available:
+        logger.error("미국·한국 모든 배치 수집 실패 — abort")
         return 1
 
-    # 2. AI 콜 #1 — 추출
-    researcher = create_researcher()
-    logger.info("[AI 1/3] 4배치 추출...")
-    extraction = extract_per_batch(batches, researcher=researcher)
+    # 2-4. AI 콜 (try/except로 감싸서 실패 시 Telegram 에러 알림)
+    try:
+        researcher = create_researcher()
+        logger.info("[AI 1/3] 4배치 추출...")
+        extraction = extract_per_batch(batches, researcher=researcher)
 
-    # 3. AI 콜 #2 — TOP3
-    logger.info("[AI 2/3] TOP3 종합...")
-    top3 = select_top3(extraction, researcher=researcher)
+        logger.info("[AI 2/3] TOP3 종합...")
+        top3 = select_top3(extraction, researcher=researcher)
 
-    # 4. AI 콜 #3 — 전망
-    logger.info("[AI 3/3] 전망 생성...")
-    outlook = generate_outlook(top3, batches, researcher=researcher)
+        logger.info("[AI 3/3] 전망 생성...")
+        outlook = generate_outlook(top3, batches, researcher=researcher)
+    except Exception as e:
+        logger.error(f"AI 처리 실패: {e}", exc_info=True)
+        if not test_mode:
+            token = os.getenv("TELEGRAM_TOKEN")
+            chat_id = os.getenv("CHAT_ID")
+            if token and chat_id:
+                try:
+                    notifier = create_notifier(token, chat_id)
+                    notifier.send_message(
+                        f"⚠️ 트렌드 스캐너 AI 처리 실패\n"
+                        f"시각: {now_kst.strftime('%Y-%m-%d %H:%M KST')}\n"
+                        f"수집: {counts}\n"
+                        f"오류: {type(e).__name__}: {str(e)[:300]}"
+                    )
+                except Exception as notify_err:
+                    logger.error(f"에러 알림 발송 실패: {notify_err}")
+        return 1
 
     # 5. 검증
     full_text = str(top3) + str(outlook)
@@ -115,13 +135,19 @@ def main(test_mode: bool = False) -> int:
         logger.warning(f"⚠️ 인덱스 검증 실패 {len(verify_result['missing'])}건: {verify_result['missing'][:10]}")
 
     # 6. 포맷
-    msg_us = format_us(now_kst, top3, outlook, counts, verify_result)
-    msg_kr = format_kr(now_kst, top3, outlook, counts, verify_result)
+    msg_us = format_us(now_kst, top3, outlook, counts, verify_result) if us_available else None
+    msg_kr = format_kr(now_kst, top3, outlook, counts, verify_result) if kr_available else None
 
     # 7. 발송
     if test_mode:
-        print("\n=== 미국 메시지 ===\n" + msg_us)
-        print("\n=== 한국 메시지 ===\n" + msg_kr)
+        if msg_us:
+            print("\n=== 미국 메시지 ===\n" + msg_us)
+        else:
+            print("\n=== 미국 메시지 === (수집 부족으로 생략)")
+        if msg_kr:
+            print("\n=== 한국 메시지 ===\n" + msg_kr)
+        else:
+            print("\n=== 한국 메시지 === (수집 부족으로 생략)")
         print(f"\n=== 검증 결과 ===\n{verify_result}")
         return 0
 
@@ -132,10 +158,14 @@ def main(test_mode: bool = False) -> int:
         return 1
 
     notifier = create_notifier(token, chat_id)
-    sent_us = notifier.send_message(msg_us)
-    sent_kr = notifier.send_message(msg_kr)
-    logger.info(f"발송 결과: 미국={sent_us}, 한국={sent_kr}")
-    return 0 if (sent_us and sent_kr) else 1
+    results = []
+    if msg_us:
+        results.append(("us", notifier.send_message(msg_us)))
+    if msg_kr:
+        results.append(("kr", notifier.send_message(msg_kr)))
+    for region, ok in results:
+        logger.info(f"발송 결과: {region}={ok}")
+    return 0 if all(ok for _, ok in results) else 1
 
 
 if __name__ == "__main__":

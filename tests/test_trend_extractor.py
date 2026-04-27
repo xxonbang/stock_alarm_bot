@@ -195,6 +195,29 @@ def test_generate_outlook_raises_on_empty_refs():
     fake_researcher.call.assert_not_called()
 
 
+def test_verify_indices_bundled_brackets_all_valid():
+    text = "[미뉴스#3,#5,#1] [미커뮤#2,#3]"
+    result = verify_indices(text, _make_batches())
+    assert result["ok"] is True
+    assert result["total_refs"] == 5  # 3+5+1+2+3 = 5 unique indices
+
+
+def test_verify_indices_bundled_with_missing():
+    text = "[미뉴스#3,#7,#99] [미커뮤#2]"  # us_news idx 7 doesn't exist (range 1..5)
+    result = verify_indices(text, _make_batches())
+    assert result["ok"] is False
+    assert ("us_news", 7) in result["missing"]
+    assert ("us_news", 99) in result["missing"]
+    assert ("us_news", 3) not in result["missing"]
+
+
+def test_verify_indices_mixed_single_and_bundled():
+    text = "단일 [미뉴스#3] 그리고 묶음 [미커뮤#1,#2,#3]"
+    result = verify_indices(text, _make_batches())
+    assert result["ok"] is True
+    assert result["total_refs"] == 4
+
+
 def test_parse_json_retry_appends_clarification_suffix():
     """재시도 시 프롬프트에 clarification suffix 추가"""
     batches = _make_batches()

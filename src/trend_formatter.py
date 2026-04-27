@@ -15,13 +15,23 @@ def _verify_warning(verify_result: Dict) -> str:
 
 
 def _format_section(title_emoji: str, title: str, top3_list, outlook_list) -> str:
-    """공통 — TOP3 항목 3개 + 각 항목의 outlook을 결합"""
+    """공통 — TOP3 항목 3개 + 각 항목의 outlook을 결합
+
+    인덱스 기반 페어링으로 LLM이 outlook의 name을 미세 변형해도 매칭 안전.
+    fallback: name 매칭 실패 시 outlook_list[i]의 outlook 필드 사용.
+    """
     lines = [f"{title_emoji} {title}"]
     outlook_by_name = {o["name"]: o["outlook"] for o in outlook_list}
     for i, entry in enumerate(top3_list, start=1):
         name = entry["name"]
         reason = entry["reason"]
-        outlook = outlook_by_name.get(name, "(전망 누락)")
+        # 1차: 정확 매칭
+        outlook = outlook_by_name.get(name)
+        # 2차: 인덱스 기반 fallback (LLM이 name을 미세 변형한 경우)
+        if outlook is None and i - 1 < len(outlook_list):
+            outlook = outlook_list[i - 1].get("outlook", "(전망 누락)")
+        if outlook is None:
+            outlook = "(전망 누락)"
         lines.append(f"{i}. {name} — {reason}")
         lines.append(f"   {outlook}")
     return "\n".join(lines)

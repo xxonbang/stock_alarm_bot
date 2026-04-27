@@ -18,23 +18,28 @@ LABEL_TO_BATCH = {
     "한커뮤": "kr_community",
 }
 
-INDEX_PATTERN = re.compile(r"\[(미뉴스|미커뮤|한뉴스|한커뮤)#(\d+)\]")
+# 단일 또는 묶음 인덱스 모두 매칭: [미뉴스#3] 또는 [미뉴스#3,#7,#12]
+BUNDLE_PATTERN = re.compile(r"\[(미뉴스|미커뮤|한뉴스|한커뮤)((?:#\d+,?)+)\]")
+NUM_PATTERN = re.compile(r"#(\d+)")
 
 
 def verify_indices(text: str, batches: Dict[str, List[CollectedItem]]) -> Dict:
     """
-    출력 text에 등장한 [라벨#N] 인덱스를 실제 수집 데이터와 매핑 검증.
+    출력 text에 등장한 [라벨#N] 또는 [라벨#a,#b,#c] 인덱스를
+    실제 수집 데이터와 매핑 검증.
 
     Returns:
         {"ok": bool, "missing": [(batch, idx), ...], "total_refs": int}
     """
-    found = INDEX_PATTERN.findall(text)
-    cited = {(LABEL_TO_BATCH[lbl], int(n)) for lbl, n in found}
+    cited = set()
+    for label, body in BUNDLE_PATTERN.findall(text):
+        for n in NUM_PATTERN.findall(body):
+            cited.add((LABEL_TO_BATCH[label], int(n)))
 
     actual = {(b, item.idx) for b, items in batches.items() for item in items}
     missing = sorted(cited - actual)
 
-    return {"ok": len(missing) == 0, "missing": missing, "total_refs": len(found)}
+    return {"ok": len(missing) == 0, "missing": missing, "total_refs": len(cited)}
 
 
 def _load_prompt(name: str) -> str:
