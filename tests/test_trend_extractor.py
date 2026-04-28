@@ -149,49 +149,46 @@ def test_select_top3_passes_extraction_to_ai():
 from src.trend_extractor import generate_outlook
 
 
-def test_generate_outlook_includes_only_referenced_texts():
-    """TOP3 reason에 인용된 인덱스에 해당하는 글만 프롬프트에 포함"""
-    batches = _make_batches()
+def test_generate_outlook_passes_top3_to_ai_with_search_enabled():
+    """generate_outlook은 TOP3를 프롬프트에 넣고 Google Search grounding을 활성화"""
     top3 = {
-        "us_top3_sectors": [
-            {"name": "AI", "reason": "...", "us_news_refs": [3], "us_community_refs": [2]},
-        ],
+        "us_top3_sectors": [{"name": "AI 인프라", "reason": "..."}],
         "us_top3_stocks": [],
         "kr_top3_sectors": [],
         "kr_top3_stocks": [],
     }
     fake_response = json.dumps({
-        "us_sector_outlook": [], "us_stock_outlook": [],
+        "us_sector_outlook": [{"name": "AI 인프라", "outlook": "전망"}],
+        "us_stock_outlook": [],
         "kr_sector_outlook": [], "kr_stock_outlook": [],
     })
     fake_researcher = MagicMock()
     fake_researcher.call.return_value = (fake_response, {"total_tokens": 100})
 
-    result = generate_outlook(top3, batches, researcher=fake_researcher)
+    result = generate_outlook(top3, researcher=fake_researcher)
 
-    prompt = fake_researcher.call.call_args.kwargs.get("prompt") or fake_researcher.call.call_args.args[0]
-    # 인용된 us_news#3, us_community#2 글이 프롬프트에 포함
-    assert "[미뉴스#3]" in prompt
-    assert "[미커뮤#2]" in prompt
-    # 인용되지 않은 글은 미포함 (idx 1, 4, 5는 us_news에서 인용 안 됨)
-    assert "[미뉴스#1]" not in prompt
+    # researcher.call에 enable_search=True 전달
+    fake_researcher.call.assert_called_once()
+    kwargs = fake_researcher.call.call_args.kwargs
+    assert kwargs.get("enable_search") is True
+    # 프롬프트에 TOP3 내용 포함
+    prompt = kwargs.get("prompt") or fake_researcher.call.call_args.args[0]
+    assert "AI 인프라" in prompt
     assert "us_sector_outlook" in result
 
 
-def test_generate_outlook_raises_on_empty_refs():
-    """TOP3 모든 항목의 refs가 비어 있으면 RuntimeError"""
+def test_generate_outlook_raises_when_top3_is_empty():
+    """TOP3가 모두 비어있으면 RuntimeError"""
     import pytest
-    batches = _make_batches()
-    top3_no_refs = {
-        "us_top3_sectors": [{"name": "X", "reason": "...", "us_news_refs": [], "us_community_refs": []}],
+    top3_empty = {
+        "us_top3_sectors": [],
         "us_top3_stocks": [],
         "kr_top3_sectors": [],
         "kr_top3_stocks": [],
     }
     fake_researcher = MagicMock()
-    with pytest.raises(RuntimeError, match="참조된 인덱스가 없어"):
-        generate_outlook(top3_no_refs, batches, researcher=fake_researcher)
-    # researcher.call should NOT have been invoked
+    with pytest.raises(RuntimeError, match="TOP3 결과가 비어있어"):
+        generate_outlook(top3_empty, researcher=fake_researcher)
     fake_researcher.call.assert_not_called()
 
 

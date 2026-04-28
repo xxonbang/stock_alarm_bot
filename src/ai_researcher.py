@@ -61,7 +61,8 @@ class AIResearcher:
         max_retries: int = 5,
         temperature: float = 0.4,
         max_output_tokens: int = 4000,
-        system_instruction: str = None
+        system_instruction: str = None,
+        enable_search: bool = False,
     ) -> Tuple[str, Dict]:
         """
         AI API 호출 (Exponential Backoff 적용, Rate Limit vs Quota 초과 구분)
@@ -93,6 +94,11 @@ class AIResearcher:
         if system_instruction:
             config_params['systemInstruction'] = system_instruction
             logger.info("시스템 인스트럭션 적용됨")
+
+        # Google Search grounding 활성화 (option)
+        if enable_search:
+            config_params['tools'] = [types.Tool(google_search=types.GoogleSearch())]
+            logger.info("🔎 Google Search grounding 활성화")
 
         generation_config = types.GenerateContentConfig(**config_params)
 
@@ -260,6 +266,7 @@ class AIResearcher:
         temperature: float = 0.2,
         max_output_tokens: int = 6000,
         max_retries: int = 5,
+        enable_search: bool = False,
     ) -> Tuple[str, Dict]:
         """
         외부 모듈이 직접 호출하는 공개 진입점.
@@ -271,6 +278,7 @@ class AIResearcher:
             temperature: 응답 다양성 (트렌드 스캐너는 0.2 권장 — 객관성)
             max_output_tokens: 최대 출력 토큰
             max_retries: 키 폴백 포함 최대 재시도
+            enable_search: True 시 Gemini Google Search grounding tool 활성화
 
         Returns:
             (response_text, usage_info)
@@ -281,6 +289,7 @@ class AIResearcher:
             temperature=temperature,
             max_output_tokens=max_output_tokens,
             system_instruction=system_instruction,
+            enable_search=enable_search,
         )
 
     def generate_briefing(self, collected_data: str) -> Tuple[str, str, Dict]:

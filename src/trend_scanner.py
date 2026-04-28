@@ -109,8 +109,8 @@ def main(test_mode: bool = False) -> int:
         logger.info("[AI 2/3] TOP3 종합...")
         top3 = select_top3(extraction, researcher=researcher)
 
-        logger.info("[AI 3/3] 전망 생성...")
-        outlook = generate_outlook(top3, batches, researcher=researcher)
+        logger.info("[AI 3/3] 전망 생성 (Google Search grounding)...")
+        outlook = generate_outlook(top3, researcher=researcher)
     except AIUpstreamError as e:
         logger.error(f"Gemini API 외부 장애: {e}")
         if not test_mode:

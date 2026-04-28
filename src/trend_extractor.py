@@ -74,11 +74,14 @@ def _parse_json_with_retry(
     prompt: str,
     max_retries: int = 3,
     temperature: float = 0.2,
+    enable_search: bool = False,
 ) -> Tuple[Dict, Dict]:
     """LLM 응답을 JSON 파싱. 실패 시 재시도 (최초 1회 + 추가 max_retries-1회).
 
     `_call_ai`가 sentinel 문자열을 반환하면(외부 API 장애) 즉시 AIUpstreamError raise.
     재시도해도 같은 sentinel이 돌아오며 quota만 소진되기 때문.
+
+    enable_search=True 시 Google Search grounding 활성화.
     """
     last_err = None
     for attempt in range(max_retries):
@@ -95,6 +98,7 @@ def _parse_json_with_retry(
                 prompt=attempt_prompt,
                 temperature=temperature,
                 max_output_tokens=8000,
+                enable_search=enable_search,
             )
             stripped = (text or "").strip()
             # 외부 API 장애 sentinel 즉시 감지 → 재시도 무의미
@@ -141,54 +145,35 @@ def select_top3(extraction: Dict, researcher) -> Dict:
     return result
 
 
-def _collect_referenced_indices(top3: Dict) -> Dict[str, set]:
-    """TOP3 결과의 모든 *_refs 필드에서 인용된 인덱스를 batch별로 모음"""
-    refs: Dict[str, set] = {b: set() for b in ("us_news", "us_community", "kr_news", "kr_community")}
-    field_to_batch = [
-        ("us_news_refs", "us_news"),
-        ("us_community_refs", "us_community"),
-        ("kr_news_refs", "kr_news"),
-        ("kr_community_refs", "kr_community"),
-    ]
+def _has_any_top3_entry(top3: Dict) -> bool:
+    """TOP3 결과에 적어도 하나의 항목이 있는지"""
     for key in ("us_top3_sectors", "us_top3_stocks", "kr_top3_sectors", "kr_top3_stocks"):
-        for entry in top3.get(key, []):
-            for field, batch in field_to_batch:
-                for idx in entry.get(field, []) or []:
-                    refs[batch].add(int(idx))
-    return refs
+        if top3.get(key):
+            return True
+    return False
 
 
 def generate_outlook(
     top3: Dict,
-    batches: Dict[str, List[CollectedItem]],
     researcher,
 ) -> Dict:
     """
-    AI 콜 #3 — 12개 항목 전망. TOP3 reason에 인용된 글만 프롬프트에 포함.
+    AI 콜 #3 — 12개 항목의 향후 1주일 전망.
+    Gemini Google Search grounding을 활성화하여 모델이 직접 최신 정보를 검색·조사한 뒤
+    보수적·객관적 톤으로 작성한다. TOP3 결과만 입력으로 사용.
     """
-    template = _load_prompt("trend_outlook.txt")
-
-    # 인용된 글만 필터
-    referenced = _collect_referenced_indices(top3)
-    referenced_items: List[CollectedItem] = []
-    for batch, idx_set in referenced.items():
-        for it in batches.get(batch, []):
-            if it.idx in idx_set:
-                referenced_items.append(it)
-
-    if not referenced_items:
+    if not _has_any_top3_entry(top3):
         raise RuntimeError(
-            "TOP3 결과에 참조된 인덱스가 없어 outlook 생성 불가 — "
-            "할루시네이션 방지를 위해 abort"
+            "TOP3 결과가 비어있어 outlook 생성 불가 — abort"
         )
 
-    referenced_text = format_indexed_text(referenced_items)
-
-    prompt = (
-        template
-        .replace("{TOP3_RESULT}", json.dumps(top3, ensure_ascii=False, indent=2))
-        .replace("{REFERENCED_TEXTS}", referenced_text)
+    template = _load_prompt("trend_outlook.txt")
+    prompt = template.replace(
+        "{TOP3_RESULT}",
+        json.dumps(top3, ensure_ascii=False, indent=2),
     )
 
-    result, _usage = _parse_json_with_retry(researcher, prompt)
+    result, _usage = _parse_json_with_retry(
+        researcher, prompt, enable_search=True
+    )
     return result
