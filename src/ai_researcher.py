@@ -9,6 +9,7 @@ os.environ["GRPC_DNS_RESOLVER"] = "native"
 os.environ["GRPC_VERBOSITY"] = "ERROR"  # 불필요한 gRPC 로그 끄기
 
 from google import genai
+import re
 import time
 import logging
 from typing import Optional, Tuple, Dict
@@ -202,7 +203,26 @@ class AIResearcher:
                 
                 # API 키 fallback 시도 (429 에러 또는 할당량 초과 시)
                 if is_quota_exceeded:
-                    # 다음 fallback 키로 전환 시도
+                    # retryDelay 파싱: 짧으면 RPM 한도(잠시 후 풀림),
+                    # 길거나 없으면 daily quota 가능성 → fallback.
+                    retry_delay_match = re.search(
+                        r"retryDelay['\"]?\s*:\s*['\"]?(\d+)\s*s", error_str
+                    )
+                    retry_delay_s = (
+                        int(retry_delay_match.group(1)) if retry_delay_match else None
+                    )
+
+                    # retryDelay < 60s → RPM 한도로 간주: 같은 키로 wait + retry
+                    if retry_delay_s is not None and retry_delay_s < 60 and attempt < max_retries - 1:
+                        wait_time = retry_delay_s + 5
+                        logger.warning(
+                            f"⚠️ RPM 한도 (retryDelay={retry_delay_s}s), 같은 키 #"
+                            f"{self._key_manager.current_key_number:02d}로 {wait_time}초 후 재시도"
+                        )
+                        time.sleep(wait_time)
+                        continue
+
+                    # 그 외 (long retryDelay 또는 파싱 실패) → daily quota 가능성, fallback
                     if self._switch_to_fallback():
                         logger.info(f"🔄 Fallback API 키 #{self._key_manager.current_key_number:02d}로 재시도...")
                         continue
