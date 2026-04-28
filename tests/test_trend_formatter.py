@@ -66,9 +66,57 @@ def test_format_us_contains_top3_sectors_and_stocks():
     assert "30개 중 8건" in msg
 
 
-def test_format_us_includes_indices():
-    msg = format_us(NOW, _sample_top3(), _sample_outlook(), counts={"us_news": 30, "us_community": 30}, verify_result={"ok": True, "missing": [], "total_refs": 50})
-    assert "[미뉴스#3" in msg
+def test_format_us_excludes_index_brackets():
+    """가독성을 위해 [라벨#N] 인덱스 블록이 메시지에 노출되지 않음"""
+    msg = format_us(NOW, _sample_top3(), _sample_outlook(),
+                    counts={"us_news": 30, "us_community": 30},
+                    verify_result={"ok": True, "missing": [], "total_refs": 50})
+    assert "[미뉴스#" not in msg
+    assert "[미커뮤#" not in msg
+    assert "[한뉴스#" not in msg
+    assert "[한커뮤#" not in msg
+
+
+def test_format_excludes_zero_count_segments():
+    """'라벨 30개 중 0건'은 의미 없으므로 표기 제거"""
+    top3 = {
+        "us_top3_sectors": [{
+            "name": "AI",
+            "reason": "미뉴스 30개 중 9건, 미커뮤 30개 중 0건 [미뉴스#1,#2] [미커뮤#]",
+        }],
+        "us_top3_stocks": [],
+        "kr_top3_sectors": [],
+        "kr_top3_stocks": [],
+    }
+    outlook = {"us_sector_outlook": [{"name": "AI", "outlook": "내용"}], "us_stock_outlook": [],
+               "kr_sector_outlook": [], "kr_stock_outlook": []}
+    msg = format_us(NOW, top3, outlook,
+                    counts={"us_news": 30, "us_community": 0},
+                    verify_result={"ok": True, "missing": [], "total_refs": 2})
+    assert "30개 중 0건" not in msg
+    assert "9건" in msg  # 0건이 아닌 빈도는 그대로 유지
+
+
+def test_format_header_hides_zero_count_source():
+    """수집 헤더에서 0건 소스는 표기 생략"""
+    top3 = {"us_top3_sectors": [], "us_top3_stocks": [],
+            "kr_top3_sectors": [], "kr_top3_stocks": []}
+    outlook = {"us_sector_outlook": [], "us_stock_outlook": [],
+               "kr_sector_outlook": [], "kr_stock_outlook": []}
+    msg = format_us(NOW, top3, outlook,
+                    counts={"us_news": 30, "us_community": 0},
+                    verify_result={"ok": True, "missing": [], "total_refs": 0})
+    assert "미국 뉴스 30" in msg
+    assert "미국 커뮤니티 0" not in msg
+
+
+def test_format_no_disclaimer():
+    """※ 본 리포트는 ... 투자 권유 문구 제거"""
+    msg = format_us(NOW, _sample_top3(), _sample_outlook(),
+                    counts={"us_news": 30, "us_community": 30},
+                    verify_result={"ok": True, "missing": [], "total_refs": 50})
+    assert "투자 권유" not in msg
+    assert "수집된 텍스트만을" not in msg
 
 
 def test_format_us_warns_on_verify_fail():
@@ -107,7 +155,7 @@ def test_format_us_falls_back_to_index_when_outlook_name_mismatches():
     msg = format_us(NOW, top3, outlook,
                     counts={"us_news": 30, "us_community": 30},
                     verify_result={"ok": True, "missing": [], "total_refs": 1})
-    assert "내용 [미뉴스#1]" in msg
+    assert "내용" in msg  # 인덱스 블록은 제거되지만 본문은 남음
     assert "(전망 누락)" not in msg
 
 
