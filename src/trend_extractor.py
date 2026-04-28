@@ -75,6 +75,7 @@ def _parse_json_with_retry(
     max_retries: int = 3,
     temperature: float = 0.2,
     enable_search: bool = False,
+    max_output_tokens: int = 32000,
 ) -> Tuple[Dict, Dict]:
     """LLM 응답을 JSON 파싱. 실패 시 재시도 (최초 1회 + 추가 max_retries-1회).
 
@@ -82,6 +83,8 @@ def _parse_json_with_retry(
     재시도해도 같은 sentinel이 돌아오며 quota만 소진되기 때문.
 
     enable_search=True 시 Google Search grounding 활성화.
+    max_output_tokens는 추출 콜의 80개 entry × refs 출력에 충분한 32000 기본값.
+    Gemini 2.5 Flash는 출력 64K까지 지원하므로 안전.
     """
     last_err = None
     for attempt in range(max_retries):
@@ -97,7 +100,7 @@ def _parse_json_with_retry(
             text, usage = researcher.call(
                 prompt=attempt_prompt,
                 temperature=temperature,
-                max_output_tokens=8000,
+                max_output_tokens=max_output_tokens,
                 enable_search=enable_search,
             )
             stripped = (text or "").strip()
