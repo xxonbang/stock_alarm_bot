@@ -20,7 +20,10 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.trend_collectors import us_news, us_community, kr_news, kr_community
-from src.trend_extractor import extract_per_batch, select_top3, generate_outlook, verify_indices
+from src.trend_extractor import (
+    extract_per_batch, select_top3, generate_outlook, verify_indices,
+    AIUpstreamError,
+)
 from src.trend_formatter import format_us, format_kr
 from src.ai_researcher import create_researcher
 from src.notifier import create_notifier
@@ -108,6 +111,25 @@ def main(test_mode: bool = False) -> int:
 
         logger.info("[AI 3/3] 전망 생성...")
         outlook = generate_outlook(top3, batches, researcher=researcher)
+    except AIUpstreamError as e:
+        logger.error(f"Gemini API 외부 장애: {e}")
+        if not test_mode:
+            token = os.getenv("TELEGRAM_TOKEN")
+            chat_id = os.getenv("CHAT_ID")
+            if token and chat_id:
+                try:
+                    notifier = create_notifier(token, chat_id)
+                    notifier.send_message(
+                        f"⚠️ 트렌드 스캐너 — Gemini API 외부 장애\n"
+                        f"시각: {now_kst.strftime('%Y-%m-%d %H:%M KST')}\n"
+                        f"수집: {counts}\n"
+                        f"원인: {str(e)[:200]}\n"
+                        f"※ 일일 할당량 소진 또는 503 카스케이드. "
+                        f"다음 정기 실행(07:30/20:00)에서 자동 재시도됩니다."
+                    )
+                except Exception as notify_err:
+                    logger.error(f"에러 알림 발송 실패: {notify_err}")
+        return 1
     except Exception as e:
         logger.error(f"AI 처리 실패: {e}", exc_info=True)
         if not test_mode:

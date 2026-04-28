@@ -57,13 +57,29 @@ def _strip_codeblock(text: str) -> str:
     return s.strip()
 
 
+# `_call_ai`가 모든 재시도 실패 시 반환하는 sentinel 문자열들.
+# 이를 JSON 파싱 시도하면 의미없는 재시도로 quota만 소진되므로 즉시 raise.
+_AI_ERROR_SENTINELS = (
+    "API 할당량 초과",
+    "오류:",
+)
+
+
+class AIUpstreamError(RuntimeError):
+    """Gemini API 외부 장애 (할당량 초과·503 카스케이드 등). JSON 파싱 재시도 무의미."""
+
+
 def _parse_json_with_retry(
     researcher,
     prompt: str,
     max_retries: int = 3,
     temperature: float = 0.2,
 ) -> Tuple[Dict, Dict]:
-    """LLM 응답을 JSON 파싱. 실패 시 재시도 (최초 1회 + 추가 max_retries-1회)."""
+    """LLM 응답을 JSON 파싱. 실패 시 재시도 (최초 1회 + 추가 max_retries-1회).
+
+    `_call_ai`가 sentinel 문자열을 반환하면(외부 API 장애) 즉시 AIUpstreamError raise.
+    재시도해도 같은 sentinel이 돌아오며 quota만 소진되기 때문.
+    """
     last_err = None
     for attempt in range(max_retries):
         attempt_prompt = prompt
@@ -80,6 +96,11 @@ def _parse_json_with_retry(
                 temperature=temperature,
                 max_output_tokens=8000,
             )
+            stripped = (text or "").strip()
+            # 외부 API 장애 sentinel 즉시 감지 → 재시도 무의미
+            for sentinel in _AI_ERROR_SENTINELS:
+                if stripped.startswith(sentinel):
+                    raise AIUpstreamError(stripped[:300])
             cleaned = _strip_codeblock(text)
             return json.loads(cleaned), usage
         except json.JSONDecodeError as e:

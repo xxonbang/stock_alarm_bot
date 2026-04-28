@@ -242,3 +242,34 @@ def test_parse_json_retry_appends_clarification_suffix():
     # 첫 번째 호출에는 없음
     first_call_prompt = fake_researcher.call.call_args_list[0].kwargs["prompt"]
     assert "JSON 파싱에 실패" not in first_call_prompt
+
+
+def test_parse_json_raises_aiupstream_on_quota_sentinel():
+    """`_call_ai`가 'API 할당량 초과(429 Error)' sentinel을 반환하면 즉시 AIUpstreamError"""
+    import pytest
+    from src.trend_extractor import AIUpstreamError, extract_per_batch
+
+    batches = _make_batches()
+    fake_researcher = MagicMock()
+    fake_researcher.call.return_value = ("API 할당량 초과(429 Error)", {})
+
+    with pytest.raises(AIUpstreamError, match="API 할당량 초과"):
+        extract_per_batch(batches, researcher=fake_researcher)
+
+    # 재시도 없이 1회만 호출 (3회 재시도해서 quota 더 소진하지 않음)
+    assert fake_researcher.call.call_count == 1
+
+
+def test_parse_json_raises_aiupstream_on_generic_error_sentinel():
+    """`_call_ai`가 '오류: ...' sentinel을 반환하면 즉시 AIUpstreamError"""
+    import pytest
+    from src.trend_extractor import AIUpstreamError, extract_per_batch
+
+    batches = _make_batches()
+    fake_researcher = MagicMock()
+    fake_researcher.call.return_value = ("오류: 503 UNAVAILABLE 5회 재시도 모두 실패", {})
+
+    with pytest.raises(AIUpstreamError, match="오류:"):
+        extract_per_batch(batches, researcher=fake_researcher)
+
+    assert fake_researcher.call.call_count == 1

@@ -73,22 +73,23 @@ class Settings:
         self.telegram_token = get_env_var('TELEGRAM_TOKEN')
         self.chat_id = get_env_var('CHAT_ID')
         
-        # Google API Keys (01, 02, 03으로 구분)
-        # 01번 키 (필수), 02/03번 키 (선택적, fallback용)
+        # Google API Keys (01~05로 구분)
+        # 01번 키 (필수), 02~05번 키 (선택적, fallback용)
         self.google_api_key_01 = get_env_var('GOOGLE_API_KEY_01')
-        # 02번, 03번 키는 선택적 (fallback용이므로 없어도 됨)
         self.google_api_key_02 = os.getenv('GOOGLE_API_KEY_02', None)
         self.google_api_key_03 = os.getenv('GOOGLE_API_KEY_03', None)
+        self.google_api_key_04 = os.getenv('GOOGLE_API_KEY_04', None)
+        self.google_api_key_05 = os.getenv('GOOGLE_API_KEY_05', None)
 
         # 기본값은 01번 키 (하위 호환성)
         self.google_api_key = self.google_api_key_01
 
         # 사용 가능한 모든 API 키 리스트 (fallback 순서대로)
         self.google_api_keys = [self.google_api_key_01]
-        if self.google_api_key_02:
-            self.google_api_keys.append(self.google_api_key_02)
-        if self.google_api_key_03:
-            self.google_api_keys.append(self.google_api_key_03)
+        for k in (self.google_api_key_02, self.google_api_key_03,
+                  self.google_api_key_04, self.google_api_key_05):
+            if k:
+                self.google_api_keys.append(k)
         
         # KRX API Key (optional, 없어도 기존 기능 동작)
         self.krx_api_key = os.getenv('KRX_API_KEY', None)
