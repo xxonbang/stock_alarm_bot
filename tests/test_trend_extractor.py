@@ -270,3 +270,93 @@ def test_parse_json_raises_aiupstream_on_generic_error_sentinel():
         extract_per_batch(batches, researcher=fake_researcher)
 
     assert fake_researcher.call.call_count == 1
+
+
+def test_filter_indices_from_top3_removes_kr_indices():
+    """코스피/코스닥/KOSPI 등은 종목 자리에서 제거됨"""
+    from src.trend_extractor import _filter_indices_from_top3
+    top3 = {
+        "us_top3_sectors": [],
+        "us_top3_stocks": [],
+        "kr_top3_sectors": [],
+        "kr_top3_stocks": [
+            {"name": "삼성전자", "reason": "한뉴스 30개 중 1건"},
+            {"name": "코스닥", "reason": "한뉴스 30개 중 9건"},  # 인덱스 — 제거되어야
+            {"name": "코스피", "reason": "한뉴스 30개 중 9건"},  # 인덱스 — 제거되어야
+        ],
+    }
+    result = _filter_indices_from_top3(top3)
+    names = [e["name"] for e in result["kr_top3_stocks"]]
+    assert "삼성전자" in names
+    assert "코스닥" not in names
+    assert "코스피" not in names
+
+
+def test_filter_indices_from_top3_removes_us_indices():
+    """S&P 500, Nasdaq, Dow 등 미국 인덱스 제거"""
+    from src.trend_extractor import _filter_indices_from_top3
+    top3 = {
+        "us_top3_sectors": [],
+        "us_top3_stocks": [
+            {"name": "Nvidia", "reason": "..."},
+            {"name": "S&P 500", "reason": "..."},  # 제거
+            {"name": "Nasdaq", "reason": "..."},   # 제거
+            {"name": "Dow Jones", "reason": "..."}, # 제거
+            {"name": "QQQ", "reason": "..."},      # ETF — 제거
+        ],
+        "kr_top3_sectors": [],
+        "kr_top3_stocks": [],
+    }
+    result = _filter_indices_from_top3(top3)
+    names = [e["name"] for e in result["us_top3_stocks"]]
+    assert names == ["Nvidia"]
+
+
+def test_filter_indices_from_extraction_per_batch():
+    """배치별 stocks·sectors에서도 인덱스 제거"""
+    from src.trend_extractor import _filter_indices_from_extraction
+    extraction = {
+        "kr_news": {
+            "stocks": [
+                {"name": "삼성전자", "freq": 5, "refs": [1]},
+                {"name": "코스피", "freq": 9, "refs": [2]},
+            ],
+            "sectors": [
+                {"name": "반도체", "freq": 8, "refs": [1]},
+                {"name": "KOSPI200", "freq": 5, "refs": [2]},  # sectors에 잘못 들어감 — 제거
+            ],
+        },
+        "us_news": {
+            "stocks": [{"name": "Nvidia", "freq": 5, "refs": [1]}],
+            "sectors": [],
+        },
+        "us_community": {"stocks": [], "sectors": []},
+        "kr_community": {"stocks": [], "sectors": []},
+    }
+    result = _filter_indices_from_extraction(extraction)
+    kr_stock_names = [e["name"] for e in result["kr_news"]["stocks"]]
+    kr_sector_names = [e["name"] for e in result["kr_news"]["sectors"]]
+    assert "삼성전자" in kr_stock_names
+    assert "코스피" not in kr_stock_names
+    assert "반도체" in kr_sector_names
+    assert "KOSPI200" not in kr_sector_names
+
+
+def test_is_index_or_market_various_forms():
+    """다양한 표기 인식 확인"""
+    from src.trend_extractor import _is_index_or_market
+    # 인덱스로 인식 (제거 대상)
+    assert _is_index_or_market("코스피")
+    assert _is_index_or_market("KOSDAQ")
+    assert _is_index_or_market("Nasdaq")
+    assert _is_index_or_market("S&P 500")
+    assert _is_index_or_market("nasdaq composite")
+    assert _is_index_or_market("VIX")
+    assert _is_index_or_market("QQQ")
+    assert _is_index_or_market("Wall Street")
+    # 종목으로 인식 (유지)
+    assert not _is_index_or_market("삼성전자")
+    assert not _is_index_or_market("Nvidia")
+    assert not _is_index_or_market("Apple")
+    assert not _is_index_or_market("반도체")  # 섹터지만 인덱스 아님
+    assert not _is_index_or_market("")

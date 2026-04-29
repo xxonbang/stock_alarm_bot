@@ -116,6 +116,66 @@ def _parse_json_with_retry(
     raise RuntimeError(f"AI JSON 파싱 {max_retries}회 실패: {last_err}")
 
 
+# 종목·섹터 양쪽에서 모두 배제할 인덱스/시장명/ETF/펀드 토큰 (대소문자 무관, 부분 매칭).
+# LLM이 prompt 지시를 무시하고 stocks에 인덱스를 넣을 경우의 안전망.
+_INDEX_TOKENS = {
+    # 한국 인덱스/시장명
+    "코스피", "코스닥", "kospi", "kospi200", "kospi 200", "코스피200",
+    "kosdaq", "krx", "k200", "k-otc", "한국 증시", "한국증시",
+    # 미국 인덱스/시장명
+    "s&p 500", "s&p500", "s&p", "snp500",
+    "nasdaq", "nasdaq composite", "nasdaq-100", "nasdaq 100",
+    "dow", "dow jones", "djia", "dow industrial",
+    "russell", "russell 2000", "russell 1000",
+    "vix", "wall street", "월스트리트", "미국 증시", "미국증시",
+    # 흔한 ETF
+    "spy", "qqq", "arkk", "vti", "voo", "iwm", "tqqq", "sqqq", "soxl", "soxs",
+}
+
+
+def _is_index_or_market(name: str) -> bool:
+    """종목명이 지수·시장명·ETF인지 판정 (대소문자 무관)."""
+    if not name:
+        return False
+    n = name.strip().lower()
+    # 정확 일치 또는 단어 단위 포함
+    for token in _INDEX_TOKENS:
+        if n == token or token in n.split():
+            return True
+        # 예: "S&P 500" 같이 공백 포함 토큰의 경우 substring 검사
+        if " " in token and token in n:
+            return True
+    return False
+
+
+def _filter_indices_from_extraction(extraction: Dict) -> Dict:
+    """배치별 stocks·sectors에서 지수·시장명·ETF 제거 (안전망)."""
+    for batch_key in ("us_news", "us_community", "kr_news", "kr_community"):
+        batch = extraction.get(batch_key)
+        if not isinstance(batch, dict):
+            continue
+        for field in ("stocks", "sectors"):
+            entries = batch.get(field, [])
+            filtered = [e for e in entries if not _is_index_or_market(e.get("name", ""))]
+            removed = len(entries) - len(filtered)
+            if removed:
+                logger.info(f"  필터: {batch_key}.{field}에서 인덱스/시장명 {removed}건 제거")
+            batch[field] = filtered
+    return extraction
+
+
+def _filter_indices_from_top3(top3: Dict) -> Dict:
+    """TOP3 결과에서도 인덱스 제거 (LLM이 또 슬립할 때 대비)."""
+    for key in ("us_top3_sectors", "us_top3_stocks", "kr_top3_sectors", "kr_top3_stocks"):
+        entries = top3.get(key, [])
+        filtered = [e for e in entries if not _is_index_or_market(e.get("name", ""))]
+        removed = len(entries) - len(filtered)
+        if removed:
+            logger.info(f"  필터: {key}에서 인덱스/시장명 {removed}건 제거")
+        top3[key] = filtered
+    return top3
+
+
 def extract_per_batch(
     batches: Dict[str, List[CollectedItem]],
     researcher,
@@ -135,7 +195,8 @@ def extract_per_batch(
     prompt = template.replace("{COLLECTED_TEXT}", collected_text)
 
     result, _usage = _parse_json_with_retry(researcher, prompt)
-    return result
+    # 안전망: prompt를 LLM이 무시하고 인덱스 포함 시 후처리 제거
+    return _filter_indices_from_extraction(result)
 
 
 def select_top3(extraction: Dict, researcher) -> Dict:
@@ -145,7 +206,7 @@ def select_top3(extraction: Dict, researcher) -> Dict:
     template = _load_prompt("trend_top3.txt")
     prompt = template.replace("{EXTRACTION_RESULT}", json.dumps(extraction, ensure_ascii=False, indent=2))
     result, _usage = _parse_json_with_retry(researcher, prompt)
-    return result
+    return _filter_indices_from_top3(result)
 
 
 def _has_any_top3_entry(top3: Dict) -> bool:
