@@ -108,3 +108,91 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - **누적형** 문서(`todo.md`, `decision.md`)는 기존 내용을 절대 삭제하지 않음
 - 문서 업데이트 후 반드시 사용자에게 알림 출력
 - UI와 문서 생성은 한국어 기본
+
+---
+
+## 8. trade_info_sender 도메인 컨텍스트
+
+### 8.1 시스템 개요
+
+매일 KST 07:30·20:00 cron-job.org가 GitHub Actions의 `trend_scan.yml`을 트리거하여
+미국·한국 뉴스/커뮤니티/유튜브를 수집·분석한 뒤 텔레그램 3 메시지(미국·한국·유튜브) 발송.
+
+핵심 흐름 (`src/trend_scanner.py::main()`):
+1. **수집**: 4 batches + youtube
+   - `us_news`: Google News RSS (영문)
+   - `us_community`: HN(Algolia API) + StockTwits trending
+   - `kr_news`: Google News RSS (한글)
+   - `kr_community`: 에펨코리아 + 38커뮤 + 클리앙
+   - `youtube`: YouTube Data API + youtube-transcript-api (7개 채널 + 키워드)
+2. **AI 콜 #1**: 4 batches → 종목·섹터 10개씩 (`extract_per_batch`)
+3. **AI 콜 #2**: TOP3 종목·섹터 (`select_top3` + 인덱스 필터 + 저빈도 필터)
+4. **AI 콜 #3**: Google Search grounding으로 1주일 보수적 전망 (`generate_outlook`)
+5. **YouTube AI 콜**: 영상 10개 → TOP3 + 영상 내용 (`analyze_youtube`)
+6. **검증**: `verify_indices` 인덱스 매핑
+7. **발송**: 텔레그램 3 메시지
+
+### 8.2 외부 의존성
+
+| 서비스 | 용도 | 환경변수 |
+|---|---|---|
+| Gemini API | LLM 추출/요약/grounding (5개 키 풀) | `GOOGLE_API_KEY_01`~`05` |
+| Telegram Bot | 메시지 발송 | `TELEGRAM_TOKEN`, `CHAT_ID` |
+| YouTube Data API v3 | 영상 메타 + 검색 | `YOUTUBE_API_KEY` |
+| Supabase | 포트폴리오 종목 DB | `SUPABASE_URL`, `SUPASECRET_KEY` |
+| cron-job.org | GitHub workflow_dispatch 트리거 | `CRONJOB_API_KEY` |
+| GitHub PAT | cron-job.org → GH Actions 호출용 | `GITHUB_PAT` |
+
+### 8.3 자주 쓰는 명령
+
+```bash
+# 테스트
+./venv/bin/pytest tests/
+
+# 로컬 트렌드 스캐너 실행 (--test 모드: 콘솔 출력만)
+./venv/bin/python -m src.trend_scanner --test
+
+# GitHub Actions 수동 트리거
+gh workflow run trend_scan.yml --ref main
+
+# 최근 실행 확인
+gh run list --workflow=trend_scan.yml --limit 5
+
+# 실패 run 로그 분석
+gh run view <ID> --log-failed | grep -E "ERROR|JSON 파싱|429|503|MAX_TOKENS"
+
+# cron-job.org 등록 작업 조회
+./venv/bin/python scripts/register_cron.py --list
+
+# 포트폴리오 종목 조회
+./venv/bin/python -c "
+from config import settings
+from src.portfolio_manager import PortfolioManager
+pm = PortfolioManager()
+print('보유:', [(it['ticker'], it['name']) for it in pm.list_by_category('possession')])
+print('관심:', [(it['ticker'], it['name']) for it in pm.list_by_category('interest')])
+"
+```
+
+### 8.4 안전 규칙 (.claude/hooks가 강제)
+
+- **차단**: `rm -rf`, `git push --force`, `gh secret delete`, `DROP TABLE portfolio`
+- **자동 실행**: `src/` 또는 `tests/` Edit 후 pytest 자동
+- **자동 알림**: `git commit` 후 task_history.md 갱신 알림
+- **세션 시작**: main↔origin 차이, 최근 failed runs, 오늘 task_history 자동 표시
+
+### 8.5 알려진 운영 패턴
+
+- **Gemini 모델**: `gemini-2.5-flash-lite` (RPD 한도 풍부, grounding 지원)
+- **유튜브 자막**: 로컬에서 OK, GH Actions runner IP에서 차단 (제목·설명만 분석됨 — 정상 동작)
+- **kr_community**: 3개 사이트 best-effort. 1개 실패해도 나머지로 진행
+- **저빈도 필터**: TOP3 stocks ≥ 10/60, sectors ≥ 15/60, youtube ≥ 4/10. 미달 시 TOP3 비울 수 있음 (정상)
+- **인덱스 필터**: 코스피/코스닥/S&P 500/Nasdaq/QQQ 등은 stocks·sectors에서 자동 제거
+- **재시도 정책**: RPM 한도(retryDelay < 60s)는 같은 키로 wait+retry, daily quota는 fallback key로 전환
+
+### 8.6 .claude/ 구성요소
+
+- `.claude/agents/`: `trend-scanner-debugger`, `portfolio-manager`
+- `.claude/skills/`: `trigger-trend-scan`, `analyze-failed-run`, `verify-pipeline`
+- `.claude/hooks/`: `block-destructive`, `pytest-after-edit`, `task-history-reminder`, `session-start-brief`
+- `.claude/settings.json`: permissions (allow/deny) + hooks 등록
