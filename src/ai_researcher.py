@@ -35,7 +35,10 @@ class AIResearcher:
         try:
             api_key, key_number = self._key_manager.get_current_key()
             self.client = genai.Client(api_key=api_key)
-            self.model_name = 'gemini-2.5-flash'
+            # gemini-2.5-flash는 free tier RPD가 20으로 매우 적음.
+            # gemini-2.5-flash-lite는 free tier RPD 1000+로 훨씬 관대,
+            # 속도 더 빠르고 google_search grounding도 지원.
+            self.model_name = 'gemini-2.5-flash-lite'
 
             key_label = "기본(01)" if key_number == 1 else f"Fallback({key_number:02d})"
             logger.info(f"✅ Google GenAI v2 클라이언트 초기화 완료 ({key_label} 키): {self.model_name}")
@@ -59,7 +62,7 @@ class AIResearcher:
     def _call_ai(
         self,
         prompt: str,
-        max_retries: int = 5,
+        max_retries: int = 3,
         temperature: float = 0.4,
         max_output_tokens: int = 4000,
         system_instruction: str = None,
@@ -103,7 +106,10 @@ class AIResearcher:
 
         generation_config = types.GenerateContentConfig(**config_params)
 
-        for attempt in range(max_retries):
+        # while 루프: 키 fallback 시 attempt 카운터를 리셋해 새 키로 재시도 가능.
+        # 모든 키 소진 또는 retry 초과 시 종료.
+        attempt = 0
+        while attempt < max_retries:
             try:
                 # API 호출 전 짧은 지연 (Rate Limit 방지)
                 if attempt > 0:
@@ -220,11 +226,13 @@ class AIResearcher:
                             f"{self._key_manager.current_key_number:02d}로 {wait_time}초 후 재시도"
                         )
                         time.sleep(wait_time)
+                        attempt += 1
                         continue
 
                     # 그 외 (long retryDelay 또는 파싱 실패) → daily quota 가능성, fallback
                     if self._switch_to_fallback():
-                        logger.info(f"🔄 Fallback API 키 #{self._key_manager.current_key_number:02d}로 재시도...")
+                        logger.info(f"🔄 Fallback API 키 #{self._key_manager.current_key_number:02d}로 재시도... (attempt 카운터 리셋)")
+                        attempt = 0  # 새 키는 fresh retry budget
                         continue
                     # 모든 키 소진 시 즉시 실패 처리
                     total_keys = self._key_manager.total_keys
@@ -232,7 +240,7 @@ class AIResearcher:
                     logger.error(error_msg)
                     logger.error(f"에러 상세: {error_str}")
                     return "API 할당량 초과(429 Error)", {}
-                
+
                 elif (is_dns_error or is_timeout or is_server_overloaded) and attempt < max_retries - 1:
                     # DNS 해석 실패, 타임아웃, 서버 과부하: Exponential Backoff 적용
                     # 5초 -> 10초 -> 20초 -> 30초 -> 60초
@@ -249,8 +257,9 @@ class AIResearcher:
                     logger.warning(f"⚠️ {error_type} 에러 발생 (시도 {attempt + 1}/{max_retries}): {error_str[:200]}")
                     logger.info(f"⏳ {wait_time}초 대기 후 재시도합니다...")
                     time.sleep(wait_time)
+                    attempt += 1
                     continue
-                
+
                 elif is_rate_limit and attempt < max_retries - 1:
                     # Rate Limit: Exponential Backoff 적용
                     # 10초 -> 30초 -> 60초 -> 120초 -> 180초
@@ -260,14 +269,16 @@ class AIResearcher:
                     logger.warning(f"⚠️ Rate Limit 에러 발생 (시도 {attempt + 1}/{max_retries})")
                     logger.info(f"⏳ Exponential Backoff: {wait_time}초 대기 후 재시도합니다...")
                     time.sleep(wait_time)
+                    attempt += 1
                     continue
-                
+
                 elif attempt < max_retries - 1:
                     # 기타 에러는 5초 대기 후 재시도
                     logger.warning(f"AI API 호출 실패 (시도 {attempt + 1}/{max_retries}): {error_str}")
                     logger.warning(f"에러 타입: {error_type}")
                     logger.debug(f"전체 Traceback:\n{error_traceback}")
                     time.sleep(5)
+                    attempt += 1
                     continue
                 else:
                     # 최종 실패
@@ -285,7 +296,7 @@ class AIResearcher:
         system_instruction: Optional[str] = None,
         temperature: float = 0.2,
         max_output_tokens: int = 6000,
-        max_retries: int = 5,
+        max_retries: int = 3,
         enable_search: bool = False,
     ) -> Tuple[str, Dict]:
         """
