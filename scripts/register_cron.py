@@ -68,6 +68,17 @@ def delete_job(api_key: str, job_id: int) -> None:
     resp.raise_for_status()
 
 
+def set_job_enabled(api_key: str, job_id: int, enabled: bool) -> None:
+    """작업의 enabled 플래그만 토글 (삭제·재등록 없이 일시 정지/재개)."""
+    resp = requests.patch(
+        f"{CRONJOB_API_BASE}/jobs/{job_id}",
+        headers=_api_headers(api_key),
+        json={"job": {"enabled": enabled}},
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+
 def create_job(api_key: str, github_pat: str, title: str, hour: int, minute: int) -> int:
     """cron-job.org에 GitHub workflow_dispatch 호출 작업 1개 등록. job_id 반환."""
     payload = {
@@ -123,6 +134,8 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="기존 작업 조회만")
     parser.add_argument("--force", action="store_true", help="기존 트렌드 스캐너 작업 삭제 후 재등록")
     parser.add_argument("--delete", action="store_true", help="기존 트렌드 스캐너 작업 삭제만")
+    parser.add_argument("--disable", action="store_true", help="기존 트렌드 스캐너 작업 비활성화 (삭제 안 함, 재활성화 가능)")
+    parser.add_argument("--enable", action="store_true", help="비활성화된 트렌드 스캐너 작업 재활성화")
     args = parser.parse_args()
 
     api_key = os.getenv("CRONJOB_API_KEY")
@@ -133,7 +146,7 @@ def main() -> int:
         print("   https://console.cron-job.org/settings 에서 API 키 생성 후 .env에 추가하세요.")
         return 1
 
-    if not args.list and not args.delete and not github_pat:
+    if not args.list and not args.delete and not args.disable and not args.enable and not github_pat:
         print("❌ .env에 GITHUB_PAT이 없습니다.")
         print("   GitHub Personal Access Token (Fine-grained, Actions: Read and write 권한)")
         print("   을 발급해 .env에 GITHUB_PAT=ghp_... 형태로 추가하세요.")
@@ -155,6 +168,23 @@ def main() -> int:
         print(f"    - jobId={j['jobId']}: {j['title']} (enabled={j.get('enabled')})")
 
     if args.list:
+        return 0
+
+    # --disable / --enable: 토글만 (삭제·재등록 없이)
+    if args.disable or args.enable:
+        if not existing:
+            print(f"[2/2] 토글할 트렌드 스캐너 작업 없음")
+            return 0
+        target_state = bool(args.enable)
+        action_label = "활성화" if target_state else "비활성화"
+        print(f"[2/2] 트렌드 스캐너 작업 {len(existing)}개 {action_label}...")
+        for j in existing:
+            try:
+                set_job_enabled(api_key, j["jobId"], target_state)
+                print(f"  ✅ {action_label}: jobId={j['jobId']} ({j['title']})")
+                time.sleep(0.3)
+            except requests.HTTPError as e:
+                print(f"  ❌ {action_label} 실패 jobId={j['jobId']}: HTTP {e.response.status_code}")
         return 0
 
     # 2. --force 또는 --delete 시 기존 작업 삭제
