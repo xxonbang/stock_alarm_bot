@@ -211,13 +211,45 @@ def collect(now: Optional[datetime] = None, limit: int = 30) -> List[CollectedIt
             items.append(it)
         logger.info(f"  {source_name}: {len([x for x in parsed if x.published_at >= since])}개 (24h 내)")
 
-    # 발행시간 내림차순 정렬
-    items.sort(key=lambda x: x.published_at, reverse=True)
+    # 정렬: 6h 이내 최신 우선, 그 후 발행시간 내림차순
+    six_hours_ago = now - timedelta(hours=6)
+    items.sort(
+        key=lambda x: (x.published_at >= six_hours_ago, x.published_at),
+        reverse=True,
+    )
     items = items[:limit]
+
+    # 본문 풍부화: 상위 N개 글의 상세 페이지 fetch (분석 깊이 ↑)
+    _enrich_body_for_top_items(items, top_n=15)
+
     for i, it in enumerate(items, start=1):
         it.idx = i
-    logger.info(f"kr_community 수집 완료: {len(items)}개 (에펨+38+클리앙)")
+    logger.info(f"kr_community 수집 완료: {len(items)}개 (에펨+38+클리앙, 본문 풍부화 완료)")
     return items
+
+
+def _enrich_body_for_top_items(items: List[CollectedItem], top_n: int = 15) -> None:
+    """상위 N개 글에 대해 상세 페이지 fetch해 body 채움. 실패는 무시."""
+    for it in items[:top_n]:
+        if it.body:  # 이미 body가 있으면 skip
+            continue
+        try:
+            html = _fetch(it.url)
+            soup = BeautifulSoup(html, "html.parser")
+            # 사이트별 본문 셀렉터 (best-effort)
+            content_elem = (
+                soup.select_one("div.xe_content")          # 에펨코리아
+                or soup.select_one("div.post-article")     # 클리앙
+                or soup.select_one("div.view_content")     # 38커뮤
+                or soup.select_one("article")
+                or soup.select_one("div.content")
+            )
+            if content_elem:
+                # 텍스트만 추출, 1000자 제한
+                text = content_elem.get_text(separator=" ", strip=True)[:1000]
+                it.body = text
+        except Exception:
+            pass  # 본문 fetch 실패는 무시 (제목만으로 진행)
 
 
 if __name__ == "__main__":

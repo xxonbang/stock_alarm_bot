@@ -63,8 +63,12 @@ def collect(now: Optional[datetime] = None, limit: int = 30) -> List[CollectedIt
             seen_urls.add(item.url)
             items.append(item)
 
-    # 본문 200자 이상을 우선 정렬, 그 후 발행시간 내림차순
-    items.sort(key=lambda x: (len(x.body) >= 200, x.published_at), reverse=True)
+    # 정렬: (1) 6h 이내 최신 우선, (2) 본문 200자 이상, (3) 발행시간 내림차순
+    six_hours_ago = now - timedelta(hours=6)
+    items.sort(
+        key=lambda x: (x.published_at >= six_hours_ago, len(x.body) >= 200, x.published_at),
+        reverse=True,
+    )
     items = items[:limit]
 
     # 인덱스 부여 (1..N)

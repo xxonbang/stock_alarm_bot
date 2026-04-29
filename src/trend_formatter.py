@@ -99,6 +99,32 @@ def format_us(
     return "\n".join([header + warning, SEP, sectors, "", SEP, stocks])
 
 
+def format_youtube(now: datetime, yt_result: Dict, video_count: int) -> str:
+    """유튜브 트렌드 메시지"""
+    timestamp = now.strftime("%Y-%m-%d %H:%M KST")
+    header = (
+        f"🎬 [유튜브 트렌드] — {timestamp}\n"
+        f"수집: 한국 주식 유튜브 영상 {video_count}개 (최근 7일)\n"
+    )
+
+    def _fmt_section(emoji, title, entries):
+        lines = [f"{emoji} {title}"]
+        if not entries:
+            lines.append("(데이터 없음)")
+            return "\n".join(lines)
+        for i, e in enumerate(entries[:3], start=1):
+            name = e.get("name", "")
+            freq = e.get("freq", 0)
+            summary = _clean_reason(e.get("summary", ""))
+            lines.append(f"{i}. {name} — {video_count}개 중 {freq}건 언급")
+            lines.append(f"   {summary}")
+        return "\n".join(lines)
+
+    sectors = _fmt_section("📊", "TOP3 섹터", yt_result.get("top3_sectors", []))
+    stocks = _fmt_section("🏢", "TOP3 종목", yt_result.get("top3_stocks", []))
+    return "\n".join([header, SEP, sectors, "", SEP, stocks])
+
+
 def format_kr(
     now: datetime,
     top3: Dict,

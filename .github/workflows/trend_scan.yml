@@ -29,5 +29,6 @@ jobs:
           GOOGLE_API_KEY_03: ${{ secrets.GOOGLE_API_KEY_03 }}
           GOOGLE_API_KEY_04: ${{ secrets.GOOGLE_API_KEY_04 }}
           GOOGLE_API_KEY_05: ${{ secrets.GOOGLE_API_KEY_05 }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: |
           python -m src.trend_scanner

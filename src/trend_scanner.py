@@ -20,11 +20,13 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.trend_collectors import us_news, us_community, kr_news, kr_community
+from src.trend_collectors import youtube as yt_collector
 from src.trend_extractor import (
     extract_per_batch, select_top3, generate_outlook, verify_indices,
+    analyze_youtube,
     AIUpstreamError,
 )
-from src.trend_formatter import format_us, format_kr
+from src.trend_formatter import format_us, format_kr, format_youtube
 from src.ai_researcher import create_researcher
 from src.notifier import create_notifier
 
@@ -160,7 +162,22 @@ def main(test_mode: bool = False) -> int:
     msg_us = format_us(now_kst, top3, outlook, counts, verify_result) if us_available else None
     msg_kr = format_kr(now_kst, top3, outlook, counts, verify_result) if kr_available else None
 
-    # 7. 발송
+    # 7. 유튜브 트렌드 (별도 흐름, 실패해도 메인 발송에 영향 없음)
+    msg_youtube = None
+    try:
+        logger.info("\n[유튜브] 최근 7일 영상 수집...")
+        videos = yt_collector.collect(now=now_utc, limit=10)
+        if videos:
+            logger.info(f"[유튜브 AI] {len(videos)}개 영상 분석...")
+            yt_result = analyze_youtube(videos, researcher=researcher)
+            msg_youtube = format_youtube(now_kst, yt_result, video_count=len(videos))
+        else:
+            logger.warning("유튜브 영상 0개 — 메시지 생략")
+    except Exception as e:
+        logger.error(f"유튜브 트렌드 처리 실패: {e}", exc_info=True)
+        # 메인 발송은 계속
+
+    # 8. 발송
     if test_mode:
         if msg_us:
             print("\n=== 미국 메시지 ===\n" + msg_us)
@@ -170,6 +187,8 @@ def main(test_mode: bool = False) -> int:
             print("\n=== 한국 메시지 ===\n" + msg_kr)
         else:
             print("\n=== 한국 메시지 === (수집 부족으로 생략)")
+        if msg_youtube:
+            print("\n=== 유튜브 메시지 ===\n" + msg_youtube)
         print(f"\n=== 검증 결과 ===\n{verify_result}")
         return 0
 
@@ -185,6 +204,8 @@ def main(test_mode: bool = False) -> int:
         results.append(("us", notifier.send_message(msg_us)))
     if msg_kr:
         results.append(("kr", notifier.send_message(msg_kr)))
+    if msg_youtube:
+        results.append(("youtube", notifier.send_message(msg_youtube)))
     for region, ok in results:
         logger.info(f"발송 결과: {region}={ok}")
     return 0 if all(ok for _, ok in results) else 1

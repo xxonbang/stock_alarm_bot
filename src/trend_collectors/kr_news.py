@@ -59,7 +59,11 @@ def collect(now: Optional[datetime] = None, limit: int = 30) -> List[CollectedIt
             seen_urls.add(item.url)
             items.append(item)
 
-    items.sort(key=lambda x: (len(x.body) >= 200, x.published_at), reverse=True)
+    six_hours_ago = now - timedelta(hours=6)
+    items.sort(
+        key=lambda x: (x.published_at >= six_hours_ago, len(x.body) >= 200, x.published_at),
+        reverse=True,
+    )
     items = items[:limit]
     for i, it in enumerate(items, start=1):
         it.idx = i

@@ -116,6 +116,77 @@ def _parse_json_with_retry(
     raise RuntimeError(f"AI JSON 파싱 {max_retries}회 실패: {last_err}")
 
 
+# 동의어 정규화 사전 — 같은 종목/섹터의 다양한 표기를 대표 표기로 통합.
+# LLM이 별칭으로 분리해 출력해도 후처리에서 합산.
+_NAME_ALIASES: Dict[str, str] = {
+    # 미국 종목
+    "엔비디아": "Nvidia", "NVDA": "Nvidia", "nvidia corp": "Nvidia", "NVIDIA": "Nvidia",
+    "애플": "Apple", "AAPL": "Apple",
+    "마이크로소프트": "Microsoft", "MSFT": "Microsoft", "MS": "Microsoft",
+    "알파벳": "Alphabet", "GOOGL": "Alphabet", "GOOG": "Alphabet", "구글": "Alphabet", "Google": "Alphabet",
+    "아마존": "Amazon", "AMZN": "Amazon",
+    "메타": "Meta", "META": "Meta", "Facebook": "Meta", "페이스북": "Meta",
+    "테슬라": "Tesla", "TSLA": "Tesla",
+    "AMD": "AMD", "에이엠디": "AMD",
+    "TSMC": "TSMC", "타이완 반도체": "TSMC", "Taiwan Semiconductor": "TSMC",
+    "인텔": "Intel", "INTC": "Intel",
+    "브로드컴": "Broadcom", "AVGO": "Broadcom",
+    "팔란티어": "Palantir", "PLTR": "Palantir",
+    # 한국 종목
+    "삼성전자우": "삼성전자", "005930": "삼성전자",
+    "SK하이닉스": "SK하이닉스", "000660": "SK하이닉스", "하이닉스": "SK하이닉스",
+    "LG에너지솔루션": "LG에너지솔루션", "LG엔솔": "LG에너지솔루션", "엘지에너지솔루션": "LG에너지솔루션",
+    "현대차": "현대자동차", "현대자동차": "현대자동차",
+    "네이버": "NAVER", "Naver": "NAVER",
+    "카카오": "Kakao", "KAKAO": "Kakao",
+    "셀트리온": "셀트리온",
+    "한화에어로스페이스": "한화에어로스페이스", "한화에어로": "한화에어로스페이스",
+    # 섹터 동의어
+    "AI": "AI", "인공지능": "AI", "artificial intelligence": "AI", "Artificial Intelligence": "AI",
+    "반도체": "반도체", "semiconductor": "반도체", "Semiconductor": "반도체", "Semiconductors": "반도체",
+    "2차전지": "2차전지", "이차전지": "2차전지", "Battery": "2차전지", "EV battery": "2차전지",
+    "바이오": "바이오", "biotech": "바이오", "Biotech": "바이오", "제약": "바이오", "Pharmaceuticals": "바이오",
+    "방산": "방산", "Defense": "방산", "Defence": "방산",
+    "원자력": "원자력", "Nuclear": "원자력", "원전": "원자력",
+    "Cloud": "클라우드", "클라우드": "클라우드",
+    "Fintech": "핀테크", "핀테크": "핀테크",
+    "Healthcare": "Healthcare", "헬스케어": "Healthcare",
+    "Energy": "Energy", "에너지": "Energy",
+}
+
+
+def _canonical_name(name: str) -> str:
+    """별칭 → 대표 표기. 매칭 안되면 원래 이름 그대로."""
+    if not name:
+        return name
+    return _NAME_ALIASES.get(name.strip(), name.strip())
+
+
+def _normalize_aliases_in_extraction(extraction: Dict) -> Dict:
+    """배치별 stocks·sectors의 name을 canonical 표기로 통합 + freq 합산"""
+    for batch_key in ("us_news", "us_community", "kr_news", "kr_community"):
+        batch = extraction.get(batch_key)
+        if not isinstance(batch, dict):
+            continue
+        for field in ("stocks", "sectors"):
+            entries = batch.get(field, [])
+            merged: Dict[str, Dict] = {}
+            for e in entries:
+                canon = _canonical_name(e.get("name", ""))
+                if not canon:
+                    continue
+                if canon not in merged:
+                    merged[canon] = {"name": canon, "freq": 0, "refs": []}
+                merged[canon]["freq"] += e.get("freq", 0)
+                merged[canon]["refs"].extend(e.get("refs", []) or [])
+            # refs 중복 제거 + 정렬, freq 내림차순
+            for v in merged.values():
+                v["refs"] = sorted(set(v["refs"]))
+            sorted_entries = sorted(merged.values(), key=lambda x: x["freq"], reverse=True)
+            batch[field] = sorted_entries
+    return extraction
+
+
 # 종목·섹터 양쪽에서 모두 배제할 인덱스/시장명/ETF/펀드 토큰 (대소문자 무관, 부분 매칭).
 # LLM이 prompt 지시를 무시하고 stocks에 인덱스를 넣을 경우의 안전망.
 _INDEX_TOKENS = {
@@ -195,7 +266,8 @@ def extract_per_batch(
     prompt = template.replace("{COLLECTED_TEXT}", collected_text)
 
     result, _usage = _parse_json_with_retry(researcher, prompt)
-    # 안전망: prompt를 LLM이 무시하고 인덱스 포함 시 후처리 제거
+    # 후처리: 별칭 통합 → 인덱스/시장명 제거
+    result = _normalize_aliases_in_extraction(result)
     return _filter_indices_from_extraction(result)
 
 
@@ -215,6 +287,31 @@ def _has_any_top3_entry(top3: Dict) -> bool:
         if top3.get(key):
             return True
     return False
+
+
+def analyze_youtube(videos, researcher) -> Dict:
+    """
+    유튜브 영상 10개에서 TOP3 종목·섹터 추출 + 영상 내용 요약.
+    videos: List[YoutubeVideo]
+    """
+    if not videos:
+        return {"top3_sectors": [], "top3_stocks": []}
+
+    template = _load_prompt("youtube_trend.txt")
+    parts = []
+    for i, v in enumerate(videos, start=1):
+        ts = v.published_at.strftime("%Y-%m-%d")
+        body = v.transcript or v.description or "(자막·설명 없음)"
+        parts.append(f"[영상#{i}] [{v.channel_name}] {ts} — {v.title}\n{body[:3000]}")
+    videos_text = "\n\n".join(parts)
+    prompt = template.replace("{VIDEOS_TEXT}", videos_text)
+
+    result, _usage = _parse_json_with_retry(researcher, prompt)
+    # 인덱스/시장명 안전망
+    for key in ("top3_sectors", "top3_stocks"):
+        entries = result.get(key, [])
+        result[key] = [e for e in entries if not _is_index_or_market(e.get("name", ""))]
+    return result
 
 
 def generate_outlook(
