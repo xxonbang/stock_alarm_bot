@@ -111,8 +111,15 @@ def main(test_mode: bool = False) -> int:
         logger.info("[AI 2/3] TOP3 종합...")
         top3 = select_top3(extraction, researcher=researcher)
 
-        logger.info("[AI 3/3] 전망 생성 (Google Search grounding)...")
-        outlook = generate_outlook(top3, researcher=researcher)
+        # 약한 시그널 필터로 TOP3가 모두 비었으면 outlook skip
+        any_top3 = any(top3.get(k) for k in ("us_top3_sectors", "us_top3_stocks", "kr_top3_sectors", "kr_top3_stocks"))
+        if any_top3:
+            logger.info("[AI 3/3] 전망 생성 (Google Search grounding)...")
+            outlook = generate_outlook(top3, researcher=researcher)
+        else:
+            logger.warning("[AI 3/3] 모든 TOP3가 빈도 임계값 미달 — outlook 생성 skip")
+            outlook = {"us_sector_outlook": [], "us_stock_outlook": [],
+                       "kr_sector_outlook": [], "kr_stock_outlook": []}
     except AIUpstreamError as e:
         logger.error(f"Gemini API 외부 장애: {e}")
         if not test_mode:

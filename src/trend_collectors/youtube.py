@@ -24,13 +24,15 @@ logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
 
-# 한국 주식 관련 유명 유튜브 채널 (channel_id, name)
+# 한국 주식 관련 유명 유튜브 채널 (channel_id, name) — 모두 검증 완료
 KR_STOCK_CHANNELS = [
     ("UCsJ6RuBiTVWRX156FVbeaGg", "슈카월드"),
-    ("UCkhxNAY1jYV9DYyP-IJVwfg", "박곰희TV"),
-    ("UCXR4lsO_ABUd1bIuWiIjJzQ", "신사임당"),
-    ("UCRGNS8VBtfqMnp9LGV4t-Yw", "한경와우TV"),
-    ("UCjdBoxoTqRpFqeC9Yv7BhCw", "김작가TV"),
+    ("UCr7XsrSrvAn_WcU4kF99bbQ", "박곰희TV"),
+    ("UCaJdckl6MBdDPDf75Ec_bJA", "신사임당"),
+    ("UCGCGxsbmG_9nincyI7xypow", "한경 코리아마켓"),
+    ("UCvil4OAt-zShzkKHsg9EQAw", "김작가 TV"),
+    ("UChlv4GSd7OQl3js-jkLOnFA", "삼프로TV 3PROTV"),
+    ("UC_l2qrs1qRv_8Rs8utay-PQ", "메르의 세상읽기"),
 ]
 
 # 키워드 검색으로 추가 영상 (백필)

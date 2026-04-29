@@ -247,6 +247,47 @@ def _filter_indices_from_top3(top3: Dict) -> Dict:
     return top3
 
 
+# 최소 빈도 임계값 — 약한 시그널 노출 방지.
+# 60건 합산(뉴스30 + 커뮤30) 기준.
+MIN_STOCK_FREQ_TOTAL = 10   # 60건 중 17% 이상 (TOP3 종목)
+MIN_SECTOR_FREQ_TOTAL = 15  # 60건 중 25% 이상 (TOP3 섹터)
+
+
+def _entry_total_freq(entry: Dict, region: str) -> int:
+    """region별 *_refs 길이 합산 (실제 언급된 글 수)."""
+    if region == "us":
+        return (
+            len(entry.get("us_news_refs", []) or [])
+            + len(entry.get("us_community_refs", []) or [])
+        )
+    return (
+        len(entry.get("kr_news_refs", []) or [])
+        + len(entry.get("kr_community_refs", []) or [])
+    )
+
+
+def _enforce_min_freq_top3(top3: Dict) -> Dict:
+    """약한 시그널(저빈도) TOP3 항목 제거. 임계값 미달이면 0~2개여도 OK."""
+    for region in ("us", "kr"):
+        # 종목
+        key = f"{region}_top3_stocks"
+        entries = top3.get(key, [])
+        filtered = [e for e in entries if _entry_total_freq(e, region) >= MIN_STOCK_FREQ_TOTAL]
+        removed = len(entries) - len(filtered)
+        if removed:
+            logger.info(f"  필터: {key}에서 저빈도 {removed}건 제거 (min={MIN_STOCK_FREQ_TOTAL})")
+        top3[key] = filtered
+        # 섹터
+        key = f"{region}_top3_sectors"
+        entries = top3.get(key, [])
+        filtered = [e for e in entries if _entry_total_freq(e, region) >= MIN_SECTOR_FREQ_TOTAL]
+        removed = len(entries) - len(filtered)
+        if removed:
+            logger.info(f"  필터: {key}에서 저빈도 {removed}건 제거 (min={MIN_SECTOR_FREQ_TOTAL})")
+        top3[key] = filtered
+    return top3
+
+
 def extract_per_batch(
     batches: Dict[str, List[CollectedItem]],
     researcher,
@@ -278,7 +319,9 @@ def select_top3(extraction: Dict, researcher) -> Dict:
     template = _load_prompt("trend_top3.txt")
     prompt = template.replace("{EXTRACTION_RESULT}", json.dumps(extraction, ensure_ascii=False, indent=2))
     result, _usage = _parse_json_with_retry(researcher, prompt)
-    return _filter_indices_from_top3(result)
+    result = _filter_indices_from_top3(result)
+    # 약한 시그널 제거 — 노이즈성 TOP3 방지
+    return _enforce_min_freq_top3(result)
 
 
 def _has_any_top3_entry(top3: Dict) -> bool:
@@ -307,10 +350,23 @@ def analyze_youtube(videos, researcher) -> Dict:
     prompt = template.replace("{VIDEOS_TEXT}", videos_text)
 
     result, _usage = _parse_json_with_retry(researcher, prompt)
-    # 인덱스/시장명 안전망
+    # 안전망: 인덱스/시장명 제거 + 최소 빈도 임계값(영상 4개 이상 언급)
+    min_yt_freq = 4  # 10개 영상 중 40% 이상
     for key in ("top3_sectors", "top3_stocks"):
         entries = result.get(key, [])
-        result[key] = [e for e in entries if not _is_index_or_market(e.get("name", ""))]
+        # refs 길이 또는 freq 필드 둘 중 하나로 빈도 판단 (LLM 표기 변동 대응)
+        def _yt_freq(e):
+            f = e.get("freq", 0) or 0
+            r = len(e.get("refs", []) or [])
+            return max(f, r)
+        filtered = [
+            e for e in entries
+            if not _is_index_or_market(e.get("name", "")) and _yt_freq(e) >= min_yt_freq
+        ]
+        removed = len(entries) - len(filtered)
+        if removed:
+            logger.info(f"  필터: youtube.{key} {removed}건 제거 (인덱스 또는 < {min_yt_freq}개 영상)")
+        result[key] = filtered
     return result
 
 

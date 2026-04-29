@@ -360,3 +360,35 @@ def test_is_index_or_market_various_forms():
     assert not _is_index_or_market("Apple")
     assert not _is_index_or_market("반도체")  # 섹터지만 인덱스 아님
     assert not _is_index_or_market("")
+
+
+def test_enforce_min_freq_top3_filters_low_signal():
+    """저빈도 항목(stocks < 10, sectors < 15)은 TOP3에서 제거"""
+    from src.trend_extractor import _enforce_min_freq_top3
+    top3 = {
+        "us_top3_sectors": [
+            {"name": "AI", "us_news_refs": list(range(20)), "us_community_refs": []},  # 20 → 유지
+            {"name": "Energy", "us_news_refs": [1, 2], "us_community_refs": [3]},  # 3 → 제거
+        ],
+        "us_top3_stocks": [
+            {"name": "Nvidia", "us_news_refs": list(range(15)), "us_community_refs": []},  # 15 → 유지
+            {"name": "Critical Metals", "us_news_refs": [1], "us_community_refs": []},  # 1 → 제거
+        ],
+        "kr_top3_sectors": [
+            {"name": "반도체", "kr_news_refs": list(range(20)), "kr_community_refs": []},  # 유지
+            {"name": "AI 반도체", "kr_news_refs": [1], "kr_community_refs": []},  # 1 → 제거
+        ],
+        "kr_top3_stocks": [
+            {"name": "삼성전자", "kr_news_refs": list(range(12)), "kr_community_refs": []},  # 12 → 유지
+            {"name": "셀트리온", "kr_news_refs": [1, 2], "kr_community_refs": []},  # 2 → 제거
+        ],
+    }
+    result = _enforce_min_freq_top3(top3)
+    us_sector_names = [e["name"] for e in result["us_top3_sectors"]]
+    us_stock_names = [e["name"] for e in result["us_top3_stocks"]]
+    kr_sector_names = [e["name"] for e in result["kr_top3_sectors"]]
+    kr_stock_names = [e["name"] for e in result["kr_top3_stocks"]]
+    assert us_sector_names == ["AI"]
+    assert us_stock_names == ["Nvidia"]
+    assert kr_sector_names == ["반도체"]
+    assert kr_stock_names == ["삼성전자"]

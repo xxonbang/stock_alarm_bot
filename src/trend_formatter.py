@@ -39,8 +39,12 @@ def _format_section(title_emoji: str, title: str, top3_list, outlook_list) -> st
 
     인덱스 기반 페어링으로 LLM이 outlook의 name을 미세 변형해도 매칭 안전.
     fallback: name 매칭 실패 시 outlook_list[i]의 outlook 필드 사용.
+    빈 TOP3 (저빈도 필터로 제거된 경우)는 약한 시그널 안내 표시.
     """
     lines = [f"{title_emoji} {title}"]
+    if not top3_list:
+        lines.append("(이번 라운드는 강한 시그널 부재 — 빈도 임계값 미달)")
+        return "\n".join(lines)
     outlook_by_name = {o["name"]: o["outlook"] for o in outlook_list}
     for i, entry in enumerate(top3_list, start=1):
         name = entry["name"]
